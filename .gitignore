@@ -1,0 +1,12 @@
+# Never commit real student data.
+# Ignore every CSV anywhere in the repo...
+*.csv
+# ...except the fake sample files made by tools/make_fake_cdf.py
+!/sample/fake_*.csv
+
+# CDF downloads usually arrive zipped; keep those out too.
+*.zip
+*.xlsx
+
+# Local editor / preview settings
+.claude/

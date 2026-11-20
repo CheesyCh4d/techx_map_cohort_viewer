@@ -1,0 +1,1936 @@
+<!doctype html>
+<!--
+  MAP Cohort Viewer
+  =================
+  A single, self-contained web page. Open it in any modern browser (double-click
+  the file), drop NWEA MAP Comprehensive Data File (CDF) CSVs onto it, and it
+  shows achievement-quintile results by graduation-year cohort, for fall,
+  winter and spring terms, and compares any two terms.
+
+  PRIVACY: everything happens inside your browser tab. The page has no server,
+  loads nothing from the internet, and never stores the files. Close the tab
+  and the data is gone. (The only thing remembered is your light/dark choice.)
+
+  HOW THIS FILE IS ORGANISED
+    1. <style>   - how things look (colors, layout, print rules)
+    2. <body>    - the skeleton of the page (drop zone, controls, chart area)
+    3. <script>  - the logic, in numbered sections:
+         1  constants (quintiles, seasons)
+         2  small helpers (escape text, parse dates/terms/grades)
+         3  the CSV reader
+         4  loading files into memory (and removing duplicate rows)
+         5  applying the rules (one test per subject, grades, cohorts)
+         6  adding up counts (single terms, and pairs of terms)
+         7  choosing which rows to show
+         8  drawing the charts
+         9  table view + CSV export
+        10  print + offline snapshot
+        10b download as PDF (a tiny PDF writer, no library)
+        11  light/dark theme
+        12  wiring up the buttons and the drop zone
+        13  student drill-down (off by default, district staff only)
+-->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAP Cohort Viewer</title>
+<script>
+  // Apply a saved light/dark choice before anything is drawn, so the page
+  // doesn't flash the wrong colors. try/catch: some browsers block storage
+  // for files opened from disk, and that's fine - we just use "Auto".
+  try {
+    const saved = localStorage.getItem("mapcv-theme");
+    if (saved === "light" || saved === "dark") document.documentElement.dataset.theme = saved;
+  } catch (e) {}
+</script>
+<style>
+  /* ---- Design tokens: every color lives here so it is easy to change ----
+     Light colors are the default. Dark colors apply when the computer is in
+     dark mode (unless the user picked Light), or when the user picked Dark. */
+  :root {
+    --surface: #ffffff;
+    --surface-2: #f5f6f8;
+    --ink: #1d1f23;
+    --ink-2: #4b4f57;
+    --muted: #737883;
+    --line: #e2e4e9;
+    --accent: #1f5fa8;
+    --warn-bg: #fff3d6;
+    --warn-ink: #7a4b00;
+    --bad: #a32020;
+
+    /* NWEA-style achievement quintile colors (same in both themes) */
+    --q-low:   #8e1b1b;  /* dark red */
+    --q-loavg: #e97b26;  /* orange   */
+    --q-avg:   #7d7c22;  /* olive    */
+    --q-hiavg: #357a35;  /* green    */
+    --q-high:  #1f5fa8;  /* blue     */
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --surface: #17191d; --surface-2: #22252b; --ink: #eceef2; --ink-2: #b9bdc6;
+      --muted: #8a909b; --line: #343842; --accent: #7fb0ec;
+      --warn-bg: #3a2e12; --warn-ink: #f3cf85; --bad: #ff8a80;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --surface: #17191d; --surface-2: #22252b; --ink: #eceef2; --ink-2: #b9bdc6;
+    --muted: #8a909b; --line: #343842; --accent: #7fb0ec;
+    --warn-bg: #3a2e12; --warn-ink: #f3cf85; --bad: #ff8a80;
+    color-scheme: dark;
+  }
+
+  * { box-sizing: border-box; }
+  [hidden] { display: none !important; }
+  body {
+    margin: 0;
+    background: var(--surface);
+    color: var(--ink);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; }
+  h1 { font-size: 22px; margin: 0 0 4px; }
+  h2 { font-size: 17px; margin: 0; }
+  .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 24px; flex-wrap: wrap; }
+  .privacy { color: var(--ink-2); margin: 0 0 16px; }
+  button, select, input { font: inherit; color: inherit; }
+  button {
+    background: var(--surface-2); border: 1px solid var(--line);
+    border-radius: 6px; padding: 6px 12px; cursor: pointer;
+  }
+  button:hover { border-color: var(--muted); }
+  select { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 5px 8px; }
+  label.check { display: inline-flex; align-items: center; gap: 5px; }
+
+  /* ---- Drop zone ---- */
+  #drop {
+    border: 2px dashed var(--line); border-radius: 10px; padding: 22px;
+    text-align: center; color: var(--ink-2); background: var(--surface-2);
+  }
+  #drop.over { border-color: var(--accent); color: var(--ink); }
+  #drop label { color: var(--accent); text-decoration: underline; cursor: pointer; }
+  #drop input { display: none; }
+  #status { margin: 12px 0 0; }
+  #status ul { margin: 6px 0; padding-left: 20px; }
+  #status .bad { color: var(--bad); }
+  details.quality { margin-top: 8px; color: var(--ink-2); }
+  details.quality table { border-collapse: collapse; margin-top: 6px; }
+  details.quality td { padding: 2px 12px 2px 0; }
+  details.quality td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
+
+  /* ---- Controls (all filters live above the charts) ---- */
+  #controls {
+    display: flex; flex-direction: column; gap: 10px;
+    padding: 12px 0; margin: 16px 0 8px;
+    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+  }
+  .ctl-row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+  .ctl-group { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .ctl-label { color: var(--ink); font-weight: 600; margin-right: 2px; }
+  .seg-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
+  .seg-toggle button { border: 0; border-radius: 0; background: var(--surface); }
+  .seg-toggle button + button { border-left: 1px solid var(--line); }
+  .seg-toggle button[aria-pressed="true"] { background: var(--ink); color: var(--surface); }
+  .spacer { flex: 1; }
+
+  /* ---- Legend ---- */
+  .legend { display: flex; flex-wrap: wrap; gap: 6px 16px; color: var(--ink-2); font-size: 13px; margin: 8px 0 14px; }
+  .legend span { display: inline-flex; align-items: center; gap: 6px; }
+  .swatch { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+  .swatch.dot { border-radius: 50%; background: var(--surface); border: 2px solid var(--ink); }
+  .swatch.grey { background: #b9bcc2; }
+
+  /* ---- Chart panels ---- */
+  .panel { margin: 0 0 28px; break-inside: avoid; }
+  .panel-head { display: flex; align-items: baseline; flex-wrap: wrap; gap: 4px 10px; margin-bottom: 6px; }
+  .panel-head .sub { color: var(--muted); }
+  .panel-body { overflow-x: auto; }
+  .row { display: grid; gap: 0 18px; align-items: center; }
+  .row + .row { border-top: 1px solid var(--line); }
+  .row.cont { border-top-color: transparent; }
+  .row.head { border-bottom: 1px solid var(--line); padding-bottom: 4px; align-items: end; }
+  .rowlabel { padding: 6px 0; line-height: 1.2; }
+  .rowlabel strong { display: block; font-weight: 600; }
+  .rowlabel span { display: block; color: var(--muted); font-size: 12px; }
+
+  .subj-head { font-weight: 600; }
+  .axis { position: relative; height: 16px; margin-right: 64px; color: var(--muted); font-size: 11px; }
+  .pairmode .axis { margin-left: 54px; }
+  .axis span { position: absolute; transform: translateX(-50%); }
+  .axis span:first-child { transform: none; }
+  .axis span:last-child { transform: translateX(-100%); }
+
+  .cell { display: flex; align-items: center; gap: 8px; padding: 6px 0; }
+  .plot {
+    position: relative; flex: 1; min-width: 0;
+    /* faint gridlines at 0/20/40/60/80% - the quintile boundaries */
+    background-image: linear-gradient(to right, var(--line) 1px, transparent 1px);
+    background-size: 20% 100%;
+    border-right: 1px solid var(--line);
+  }
+  .plot.nodata { background: none; border: 0; color: var(--muted); font-size: 12px; padding: 12px 0; }
+  .bar { position: relative; height: 22px; border-radius: 4px; overflow: hidden; }
+  .seg {
+    position: absolute; top: 0; bottom: 0;
+    /* a 2px surface-colored gap on the right edge separates segments */
+    box-shadow: inset -2px 0 0 var(--surface);
+    display: flex; align-items: center; justify-content: center;
+    font-size: 11px; font-weight: 600; color: #fff; white-space: nowrap; overflow: hidden;
+    letter-spacing: -0.2px;   /* keeps "23%" snug in narrow segments */
+  }
+  .seg:last-child { box-shadow: none; }
+  .seg.Low { background: var(--q-low); }
+  .seg.LoAvg { background: var(--q-loavg); color: #1d1f23; }
+  .seg.Avg { background: var(--q-avg); }
+  .seg.HiAvg { background: var(--q-hiavg); }
+  .seg.High { background: var(--q-high); }
+  .lane { position: relative; height: 24px; }
+  .bubble {
+    position: absolute; top: 2px; transform: translateX(-50%);
+    width: 22px; height: 22px; border-radius: 50%;
+    background: var(--surface); border: 2px solid var(--ink);
+    box-shadow: 0 0 0 2px var(--surface);
+    font-size: 10px; font-weight: 700; line-height: 18px; text-align: center;
+  }
+  .n { width: 56px; flex: none; font-size: 12px; color: var(--ink-2); font-variant-numeric: tabular-nums; }
+  .lown .bar { filter: grayscale(1); opacity: 0.45; }
+  .lown .bubble { border-color: var(--muted); color: var(--muted); }
+  .lown .n, .lown.delta { color: var(--muted); }
+
+  /* Compare mode: two bars per cell (from / to) plus a change column */
+  .cell.pair { display: block; }
+  .pline { display: flex; align-items: center; gap: 8px; }
+  .ptag { width: 46px; flex: none; font-size: 11px; color: var(--muted); }
+  .delta { margin: 0 64px 2px 54px; font-size: 12px; color: var(--ink-2); display: flex; flex-wrap: wrap; gap: 2px 16px; }
+  .delta b { font-size: 13px; color: var(--ink); font-variant-numeric: tabular-nums; margin-right: 4px; }
+  .lown.delta b { color: var(--muted); }
+
+  .notes { color: var(--ink-2); font-size: 13px; border-top: 1px solid var(--line); padding-top: 10px; }
+  .notes p { margin: 4px 0; }
+  .empty-state { color: var(--ink-2); padding: 30px 0; }
+  #printHeader { display: none; color: var(--ink-2); margin: 0 0 8px; }
+  #printHeader.show { display: block; }
+
+  /* ---- Table view ---- */
+  .table-wrap { overflow-x: auto; }
+  table.data { border-collapse: collapse; width: 100%; font-size: 12.5px; font-variant-numeric: tabular-nums; }
+  table.data th, table.data td { border-bottom: 1px solid var(--line); padding: 4px 6px; text-align: right; white-space: nowrap; }
+  table.data th:nth-child(-n+4), table.data td:nth-child(-n+4) { text-align: left; }
+  table.data thead th { position: sticky; top: 0; background: var(--surface); }
+  table.data tr.lown td { color: var(--muted); }
+
+  /* ---- Hover tooltip ---- */
+  #tip {
+    position: fixed; z-index: 10; pointer-events: none; display: none;
+    background: var(--ink); color: var(--surface); border-radius: 6px;
+    padding: 6px 9px; font-size: 12px; white-space: pre-line; max-width: 300px;
+  }
+
+  /* ---- Student drill-down panel ---- */
+  .drill-hint { color: var(--ink-2); font-size: 12px; }
+  .drill-on #chart [data-drill] { cursor: pointer; }
+  .drill-on #chart .seg:hover { filter: brightness(1.15); }
+  .drill-on #chart .bubble:hover, .drill-on #chart .n:hover { text-decoration: underline; }
+  #drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; z-index: 20;
+    width: min(680px, 100vw); display: flex; flex-direction: column;
+    background: var(--surface); border-left: 1px solid var(--line);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+  }
+  .drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px 16px 10px; border-bottom: 1px solid var(--line); }
+  .drawer-head .sub, .drawer-tools .sub { color: var(--ink-2); font-size: 13px; }
+  #drawerClose { font-size: 20px; line-height: 1; padding: 4px 10px; }
+  .drawer-tools { display: flex; flex-wrap: wrap; gap: 8px 12px; align-items: center; padding: 10px 16px; }
+  .drawer-body { flex: 1; overflow: auto; padding: 0 16px; }
+  .drawer-note { margin: 0; padding: 8px 16px 12px; font-size: 12px; color: var(--ink-2); border-top: 1px solid var(--line); }
+  #drawer table.data th, #drawer table.data td { text-align: left; }
+  #drawer table.data th.num, #drawer table.data td.num { text-align: right; }
+  #drawer th button.sort { all: unset; cursor: pointer; font-weight: 600; }
+  .qdot { display: inline-block; width: 9px; height: 9px; border-radius: 2px; margin-right: 5px; }
+
+  /* ---- Printing: light colors, landscape, hide the loading and control areas ---- */
+  @media print {
+    @page { size: landscape; margin: 12mm; }
+    :root:not([data-theme]), :root[data-theme] {
+      --surface: #ffffff; --surface-2: #f5f6f8; --ink: #1d1f23; --ink-2: #4b4f57;
+      --muted: #737883; --line: #d9dce2; --warn-bg: #fff3d6; --warn-ink: #7a4b00;
+      color-scheme: light;
+    }
+    * { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+    #load, #controls, #themePick, #tip, .privacy, #drawer { display: none !important; }
+    #printHeader { display: block; }
+    main { max-width: none; padding: 0; }
+    .panel-body { overflow: visible; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <header class="top">
+    <div>
+      <h1>MAP Cohort Viewer</h1>
+      <p class="privacy">Your files are read inside this browser tab only. Nothing is uploaded or saved; closing the tab clears everything.</p>
+    </div>
+    <span class="seg-toggle" id="themePick" role="group" aria-label="Color theme">
+      <button type="button" data-theme-choice="auto">Auto</button>
+      <button type="button" data-theme-choice="light">Light</button>
+      <button type="button" data-theme-choice="dark">Dark</button>
+    </span>
+  </header>
+
+  <!-- Section: loading files -->
+  <section id="load">
+    <div id="drop">
+      Drop NWEA CDF downloads here: the <b>.zip</b> files as they are, unzipped folders, or the
+      <b>AssessmentResults.csv</b> and <b>StudentsBySchool.csv</b> files themselves
+      (as many terms and years as you like), or <label>choose files<input id="picker" type="file" accept=".csv,.zip,text/csv,application/zip" multiple></label>.
+    </div>
+    <div id="status"></div>
+  </section>
+
+  <!-- Section: filters (hidden until data is loaded) -->
+  <section id="controls" hidden>
+    <div class="ctl-row">
+      <span class="ctl-group">
+        <span class="ctl-label">View</span>
+        <span class="seg-toggle" role="group" aria-label="View">
+          <button type="button" data-view="cohort" aria-pressed="true">By cohort</button>
+          <button type="button" data-view="year" aria-pressed="false">One school year</button>
+        </span>
+      </span>
+      <label id="cohortPick" class="ctl-group"><span class="ctl-label">Cohort</span><select id="cohort"></select></label>
+      <label id="yearPick" class="ctl-group" hidden><span class="ctl-label">School year</span><select id="year"></select></label>
+      <span id="seasonPick" class="ctl-group"><span class="ctl-label">Terms</span><span id="seasons"></span></span>
+      <label class="check"><input type="checkbox" id="compare"> Compare two terms</label>
+      <span id="comparePick" class="ctl-group" hidden>
+        <select id="from" aria-label="Compare from"></select>
+        <span aria-hidden="true">&rarr;</span>
+        <select id="to" aria-label="Compare to"></select>
+        <label class="check" title="Only students who tested in both terms, so the change isn't caused by who happened to test."><input type="checkbox" id="matched" checked> Same students only</label>
+      </span>
+    </div>
+    <div class="ctl-row">
+      <label class="ctl-group"><span class="ctl-label">School</span><select id="school"></select></label>
+      <label class="ctl-group"><span class="ctl-label">Ethnicity</span><select id="eth"></select></label>
+      <label class="ctl-group"><span class="ctl-label">Gender</span><select id="gender"></select></label>    </div>
+    <div class="ctl-row">
+      <span class="ctl-group"><span class="ctl-label">Subjects</span><span id="subjects"></span></span>
+      <label class="check" title="District staff only. Shows student names in a side panel when you click a bar. Names are never included in PDFs, snapshots, printing or the summary export.">
+        <input type="checkbox" id="drillToggle"> Show students</label>
+      <span id="drillHint" class="drill-hint" hidden>Click any bar, circle or N to list its students.</span>
+      <span class="spacer"></span>
+      <button type="button" id="tableToggle">Show as table</button>
+      <button type="button" id="export">Export summary CSV</button>
+      <button type="button" id="pdf" title="Save the current view as a PDF file.">Download PDF</button>
+      <button type="button" id="print">Print</button>
+      <button type="button" id="snapshot" title="Save what you see as one HTML file (summary numbers only) to share or view offline.">Download snapshot</button>
+      <button type="button" id="clear">Clear data</button>
+    </div>
+  </section>
+
+  <div id="printHeader"></div>
+  <div id="legend"></div>
+  <section id="chart"><p class="empty-state">No data loaded yet.</p></section>
+  <div id="notes"></div>
+</main>
+<div id="tip" role="tooltip"></div>
+
+<!-- Student drill-down panel (section 13). Kept outside <main> so it is
+     never copied into snapshots, and hidden when printing. -->
+<aside id="drawer" hidden aria-label="Students in this group">
+  <div class="drawer-head">
+    <div><h2 id="drawerTitle"></h2><div id="drawerSub" class="sub"></div></div>
+    <button type="button" id="drawerClose" aria-label="Close student list">&times;</button>
+  </div>
+  <div class="drawer-tools">
+    <label class="ctl-group"><span class="ctl-label">Show</span><select id="drawerFilter"></select></label>
+    <span id="drawerCount" class="sub"></span>
+    <span class="spacer"></span>
+    <button type="button" id="drawerExport">Export student list</button>
+  </div>
+  <div class="drawer-body"><table class="data" id="drawerTable"></table></div>
+  <p class="drawer-note">Confidential student information, for district staff only. Names appear only in this panel; they are never included in PDFs, snapshots, printing or the summary export.</p>
+</aside>
+
+<script>
+"use strict";
+
+/* =========================================================================
+   1. CONSTANTS
+   ========================================================================= */
+
+// The five achievement quintiles, in order from lowest to highest.
+const QUINTILES = [
+  { key: "Low",   range: "1st-20th percentile" },
+  { key: "LoAvg", range: "21st-40th percentile" },
+  { key: "Avg",   range: "41st-60th percentile" },
+  { key: "HiAvg", range: "61st-80th percentile" },
+  { key: "High",  range: "81st-99th percentile" },
+];
+const SEASONS = ["Fall", "Winter", "Spring"];  // order within a school year
+const MIN_N = 10;              // bars with fewer students than this are greyed out
+const PREFERRED_SUBJECTS = ["Reading", "Mathematics", "Language Usage", "Science"];
+
+/* Every term gets one whole number, its "term index", so terms sort and
+   compare easily:  index = fallYear * 3 + season position.
+     Fall 2023-24 = 2023*3+0,  Winter 2023-24 = 2023*3+1,  Spring 2023-24 = 2023*3+2,
+     Fall 2024-25 = 2024*3+0 ... so "later term" is simply a bigger number. */
+const termIndex = (fallYear, season) => fallYear * 3 + SEASONS.indexOf(season);
+const fallYearOf = (idx) => Math.floor(idx / 3);
+const seasonOf = (idx) => SEASONS[idx % 3];
+
+/* =========================================================================
+   2. SMALL HELPERS
+   ========================================================================= */
+
+// Shortcut for finding one element on the page.
+const $ = (sel) => document.querySelector(sel);
+
+// Text that came from a file must be "escaped" before we put it into HTML,
+// otherwise a school name like "A & B <Elementary>" could break the page.
+function esc(value) {
+  return String(value).replace(/[&<>"']/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+}
+
+// Header names are compared loosely: "Student ID", "studentid" and
+// "StudentID" all count as the same column.
+const normHeader = (h) => String(h).toLowerCase().replace(/[^a-z0-9]/g, "");
+
+// "Fall 2026-2027" -> { season: "Fall", fallYear: 2026, springYear: 2027, label: "Fall 2026-2027" }
+// Also accepts "Fall 2026-27". Returns null if it can't make sense of it.
+function parseTerm(raw) {
+  const m = String(raw || "").trim().match(/^(fall|winter|spring|summer)\s+(\d{4})\s*[-–\/]\s*(\d{4}|\d{2})$/i);
+  if (!m) return null;
+  const season = m[1][0].toUpperCase() + m[1].slice(1).toLowerCase();
+  const fallYear = Number(m[2]);
+  let springYear = Number(m[3]);
+  if (m[3].length === 2) springYear = Math.floor(fallYear / 100) * 100 + springYear;
+  if (springYear !== fallYear + 1) return null;
+  return { season, fallYear, springYear, label: `${season} ${fallYear}-${springYear}` };
+}
+// Short labels for charts: "2023-24" and "Winter 2023-24"
+const yearShort = (fallYear) => `${fallYear}-${String(fallYear + 1).slice(2)}`;
+const termShort = (idx) => `${seasonOf(idx)} ${yearShort(fallYearOf(idx))}`;
+
+// Grades: "K", "KG", "0" -> 0; "1".."12" -> number; anything else -> null.
+function parseGrade(raw) {
+  const s = String(raw || "").trim().toUpperCase();
+  if (["K", "KG", "KN", "KDG", "0", "00"].includes(s)) return 0;
+  if (/^\d{1,2}$/.test(s)) {
+    const n = Number(s);
+    if (n >= 1 && n <= 12) return n;
+  }
+  return null;   // PK, blank, "13", etc. are left out of the cohort charts
+}
+const gradeName = (g) => (g === 0 ? "K" : String(g));
+// Grade a cohort is in during a school year: cohort = springYear + 12 - grade.
+const gradeIn = (cohort, fallYear) => fallYear + 1 + 12 - cohort;
+
+// "Low", "Lo Avg", "Low Average" ... -> one of the five standard keys.
+function normQuintile(raw) {
+  const s = String(raw || "").toLowerCase().replace(/[^a-z]/g, "");
+  if (s === "low") return "Low";
+  if (["loavg", "lowavg", "loaverage", "lowaverage"].includes(s)) return "LoAvg";
+  if (["avg", "average"].includes(s)) return "Avg";
+  if (["hiavg", "highavg", "hiaverage", "highaverage"].includes(s)) return "HiAvg";
+  if (s === "high") return "High";
+  return null;
+}
+
+/* Which subject a test belongs to. Newer CDF exports often put BOTH Reading
+   and Language Usage under Subject = "Language Arts" and tell them apart only
+   in the Course column. Treating them as one subject would merge two
+   different tests, so the Course decides when it names one of them:
+     Subject "Language Arts", Course "Reading"            -> "Reading"
+     Subject "Language Arts", Course "Language Usage"     -> "Language Usage"
+     Subject "Language Arts", Course "Reading (Spanish)"  -> "Reading (Spanish)"
+   Math courses (Math K-12, Algebra 1, Geometry...) stay "Mathematics". */
+function subjectFor(subject, course) {
+  const c = String(course || "").toLowerCase();
+  if (c.includes("reading")) return c.includes("spanish") ? "Reading (Spanish)" : "Reading";
+  if (c.includes("language usage")) return "Language Usage";
+  return subject;
+}
+
+// GrowthMeasureYN can be TRUE/FALSE, Y/N, Yes/No, 1/0 depending on the export.
+const isYes = (raw) => /^(true|t|y|yes|1)$/i.test(String(raw || "").trim());
+
+// Turn a date (9/14/2023 or 2023-09-14) plus optional time (1:05:00 PM)
+// into one sortable number, so "later test" is a simple > comparison.
+function whenNumber(dateRaw, timeRaw) {
+  const d = String(dateRaw || "").trim();
+  let y, m, day, mm;
+  if ((mm = d.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})/))) { m = +mm[1]; day = +mm[2]; y = +mm[3]; }
+  else if ((mm = d.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) { y = +mm[1]; m = +mm[2]; day = +mm[3]; }
+  else return 0;
+  let minutes = 0;
+  const t = String(timeRaw || "").trim().match(/^(\d{1,2}):(\d{2})(?::\d{2})?\s*(AM|PM)?/i);
+  if (t) {
+    let h = +t[1] % 12;
+    if (!t[3]) h = +t[1];                      // 24-hour clock
+    else if (t[3].toUpperCase() === "PM") h += 12;
+    minutes = h * 60 + +t[2];
+  }
+  return ((y * 12 + m) * 31 + day) * 1440 + minutes;
+}
+
+function median(numbers) {
+  if (!numbers.length) return null;
+  const s = [...numbers].sort((a, b) => a - b);
+  const mid = s.length >> 1;    // ">> 1" is a fast way to halve and round down
+  return s.length % 2 ? s[mid] : Math.round((s[mid - 1] + s[mid]) / 2);
+}
+
+const pct = (part, whole) => (whole ? (100 * part) / whole : 0);
+// +4, -3 (with a real minus sign), or 0
+const signed = (n) => (n > 0 ? `+${n}` : n < 0 ? `−${Math.abs(n)}` : "0");
+
+/* =========================================================================
+   3. THE CSV READER
+   -------------------------------------------------------------------------
+   A CSV file is text where commas separate fields and line breaks separate
+   rows. The tricky part: a field can be wrapped in "double quotes" so it may
+   contain commas or line breaks, and a quote inside quotes is written "".
+   This walks the text and calls onRow(fields) for every complete row.
+   ========================================================================= */
+function parseCSV(text, onRow) {
+  let i = 0;
+  const n = text.length;
+  if (text.charCodeAt(0) === 0xfeff) i = 1;   // skip the invisible "BOM" some tools add
+  let row = [];
+  let field = "";
+  let inQuotes = false;
+  while (i < n) {
+    const c = text[i];
+    if (inQuotes) {
+      if (c === '"') {
+        if (text[i + 1] === '"') { field += '"'; i += 2; continue; }   // "" means a literal quote
+        inQuotes = false; i++; continue;
+      }
+      // Copy everything up to the next quote in one go (much faster than char by char).
+      const next = text.indexOf('"', i);
+      const end = next === -1 ? n : next;
+      field += text.slice(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '"') { inQuotes = true; i++; continue; }
+    if (c === ",") { row.push(field); field = ""; i++; continue; }
+    if (c === "\n" || c === "\r") {
+      row.push(field); field = "";
+      if (c === "\r" && text[i + 1] === "\n") i++;   // Windows line ending is \r\n
+      i++;
+      if (!(row.length === 1 && row[0] === "")) onRow(row);   // ignore blank lines
+      row = [];
+      continue;
+    }
+    // Plain (unquoted) text: grab the run up to the next special character.
+    let j = i + 1;
+    while (j < n) {
+      const cj = text[j];
+      if (cj === "," || cj === "\n" || cj === "\r" || cj === '"') break;
+      j++;
+    }
+    field += text.slice(i, j);
+    i = j;
+  }
+  if (field !== "" || row.length) { row.push(field); onRow(row); }
+}
+
+/* =========================================================================
+   4. LOADING FILES INTO MEMORY
+   -------------------------------------------------------------------------
+   We keep only the columns we need. Each kept row is stored in a Map under
+   a "key" made from its values; if the same key shows up again (the same
+   row in two overlapping exports), it is counted as a duplicate and skipped.
+   Fall, Winter and Spring are kept; Summer rows are skipped.
+   ========================================================================= */
+const store = {
+  files: [],              // one info object per file dropped
+  tests: new Map(),       // key -> test record (from AssessmentResults)
+  enrollments: new Map(), // key -> enrollment record (from StudentsBySchool)
+};
+
+function loadCsvText(fileName, text) {
+  const info = { name: fileName, kind: "unknown", rows: 0, dupes: 0, skipped: 0, badTerm: 0, message: "" };
+  let col = null;       // column positions, worked out from the header row
+  let kind = null;
+
+  parseCSV(text, (row) => {
+    // ---- First row: the header. Decide what kind of file this is. ----
+    if (col === null) {
+      const headers = row.map(normHeader);
+      const find = (...names) => {
+        for (const name of names) {
+          const at = headers.indexOf(normHeader(name));
+          if (at >= 0) return at;
+        }
+        return -1;
+      };
+      col = {};
+      if (find("TestRITScore", "AchievementQuintile") >= 0) {
+        kind = "tests";
+        col = {
+          term: find("TermName"), sid: find("StudentID"), school: find("SchoolName"),
+          subject: find("Subject", "Discipline"),   // older CDFs call it "Discipline"
+          course: find("Course", "MeasurementScale"),
+          pctile: find("TestPercentile"), quint: find("AchievementQuintile"),
+          growth: find("GrowthMeasureYN"), date: find("TestStartDate"),
+          time: find("TestStartTime"), testId: find("TestID"), rit: find("TestRITScore"),
+        };
+        const missing = ["term", "sid", "subject", "quint"].filter((k) => col[k] < 0);
+        if (missing.length) {
+          info.message = "Missing needed column(s): " + missing.join(", ");
+          kind = null;
+          info.kind = "error";
+        } else {
+          info.kind = "AssessmentResults";
+        }
+      } else if (find("Grade") >= 0 && find("StudentID") >= 0) {
+        kind = "enrollments";
+        col = { term: find("TermName"), sid: find("StudentID"), grade: find("Grade"), school: find("SchoolName"),
+                last: find("StudentLastName", "LastName"), first: find("StudentFirstName", "FirstName"),
+                eth: find("StudentEthnicGroup", "EthnicGroup", "Ethnicity"), gender: find("StudentGender", "Gender") };
+        if (col.term < 0) { info.message = "Missing TermName column"; kind = null; info.kind = "error"; }
+        else info.kind = "StudentsBySchool";
+      } else {
+        info.message = "Not a file this page uses - ignored.";
+      }
+      return;
+    }
+    if (!kind) return;
+
+    // ---- Every other row ----
+    info.rows++;
+    const get = (k) => (col[k] >= 0 ? (row[col[k]] ?? "").trim() : "");
+    const term = parseTerm(get("term"));
+    if (!term) { info.badTerm++; return; }
+    if (!SEASONS.includes(term.season)) { info.skipped++; return; }   // summer
+    const idx = termIndex(term.fallYear, term.season);
+
+    if (kind === "tests") {
+      const raw = ["term", "sid", "subject", "course", "school", "pctile", "quint", "growth", "date", "time", "testId"].map(get);
+      raw[0] = term.label;
+      const key = raw.join("\u001f");    // \u001f is an invisible separator character
+      if (store.tests.has(key)) { info.dupes++; return; }
+      store.tests.set(key, {
+        termIdx: idx, springYear: term.springYear,
+        sid: get("sid"), subject: subjectFor(get("subject"), get("course")), school: get("school") || "(no school)",
+        pctile: Number(get("pctile")), quint: normQuintile(get("quint")),
+        growth: isYes(get("growth")), when: whenNumber(get("date"), get("time")),
+        rit: get("rit") === "" ? null : Number(get("rit")),
+      });
+    } else if (kind === "enrollments") {
+      const key = [term.label, get("sid"), get("grade"), get("school")].join("\u001f");
+      if (store.enrollments.has(key)) { info.dupes++; return; }
+      // Names are kept only for the optional student drill-down (section 13).
+      // Ethnicity and gender are kept for the Student group filters.
+      store.enrollments.set(key, { termIdx: idx, sid: get("sid"), grade: parseGrade(get("grade")),
+                                   last: get("last"), first: get("first"),
+                                   eth: get("eth") || "(blank)", gender: get("gender") || "(blank)" });
+    }
+  });
+
+  if (col === null) info.message = "Empty file.";
+  store.files.push(info);
+}
+
+/* =========================================================================
+   5. APPLYING THE RULES
+   -------------------------------------------------------------------------
+   Produces `records`: one entry per student per subject per term, with the
+   student's grade and graduation cohort attached. `recordIndex` lets us find
+   "this student's Reading result in Spring 2024" instantly, which the
+   same-students comparison needs. Student IDs stay inside this tab; they are
+   never drawn, exported or put in a snapshot.
+   ========================================================================= */
+let records = [];
+let recordIndex = new Map();
+let studentNames = new Map();   // StudentID -> "Last, First" (drill-down only)
+let quality = {};
+
+function rebuild() {
+  const q = { testsKept: 0, extraTests: 0, noGradeMatch: 0, gradeOutOfRange: 0,
+              gradeConflicts: 0, noQuintile: 0, bySeason: { Fall: 0, Winter: 0, Spring: 0 } };
+
+  // RULE 1 (part 1): build a lookup "StudentID + term -> grade".
+  // Also remember each student's name (from their most recent term).
+  const gradeOf = new Map();
+  const names = new Map();
+  const demoOf = new Map();     // "StudentID|term" -> { eth, gender }
+  for (const e of store.enrollments.values()) {
+    const name = [e.last, e.first].filter(Boolean).join(", ");
+    if (name && (!names.has(e.sid) || names.get(e.sid).termIdx < e.termIdx)) names.set(e.sid, { name, termIdx: e.termIdx });
+    const key = e.sid + "|" + e.termIdx;
+    if (!demoOf.has(key)) demoOf.set(key, { eth: e.eth, gender: e.gender });
+    if (gradeOf.has(key) && gradeOf.get(key) !== e.grade) {
+      q.gradeConflicts++;                         // same student, two grades in one term
+      gradeOf.set(key, Math.max(gradeOf.get(key) ?? -1, e.grade ?? -1));
+    } else {
+      gradeOf.set(key, e.grade);
+    }
+  }
+
+  // RULE 3: one test per student / subject / term.
+  // Prefer GrowthMeasureYN = TRUE; if tied, prefer the latest TestStartDate.
+  const best = new Map();
+  for (const t of store.tests.values()) {
+    const key = t.sid + "|" + t.termIdx + "|" + t.subject;
+    const current = best.get(key);
+    if (!current) { best.set(key, t); continue; }
+    q.extraTests++;
+    const better = t.growth !== current.growth ? t.growth : t.when > current.when;
+    if (better) best.set(key, t);
+  }
+
+  // RULE 1 (part 2) + RULE 4 + RULE 5: attach grade, compute cohort, keep quintile.
+  const out = [];
+  const index = new Map();
+  for (const t of best.values()) {
+    const grade = gradeOf.get(t.sid + "|" + t.termIdx);
+    if (grade === undefined) { q.noGradeMatch++; continue; }
+    if (grade === null || grade < 0) { q.gradeOutOfRange++; continue; }
+    if (!t.quint) { q.noQuintile++; continue; }
+    const r = {
+      sid: t.sid, termIdx: t.termIdx, season: seasonOf(t.termIdx), fallYear: fallYearOf(t.termIdx),
+      grade, cohort: t.springYear + (12 - grade),     // RULE 4: graduation year
+      subject: t.subject, school: t.school, quint: t.quint,
+      pctile: Number.isFinite(t.pctile) && t.pctile > 0 ? t.pctile : null,
+      rit: Number.isFinite(t.rit) ? t.rit : null,
+      // Student group details as listed for THIS term
+      eth: demoOf.get(t.sid + "|" + t.termIdx).eth,
+      gender: demoOf.get(t.sid + "|" + t.termIdx).gender,    };
+    out.push(r);
+    index.set(r.sid + "|" + r.subject + "|" + r.termIdx, r);
+    q.bySeason[r.season]++;
+  }
+  q.testsKept = out.length;
+  studentNames = new Map([...names].map(([sid, v]) => [sid, v.name]));
+  records = out;
+  recordIndex = index;
+  quality = q;
+}
+
+/* =========================================================================
+   6. ADDING UP COUNTS
+   -------------------------------------------------------------------------
+   A "cell" is one bar: one cohort + one term + one subject, holding how
+   many students land in each quintile and their median percentile.
+   ========================================================================= */
+const cellKey = (cohort, termIdx, subject) => cohort + "|" + termIdx + "|" + subject;
+
+function newCell(cohort, termIdx, subject) {
+  return { cohort, termIdx, subject, n: 0,
+           counts: { Low: 0, LoAvg: 0, Avg: 0, HiAvg: 0, High: 0 }, pctiles: [] };
+}
+function addToCell(c, r) {
+  c.n++;
+  c.counts[r.quint]++;
+  if (r.pctile !== null) c.pctiles.push(r.pctile);
+}
+function finishCell(c) {
+  c.median = median(c.pctiles);
+  delete c.pctiles;      // throw the individual scores away once we have the median
+}
+
+/* ---- Filters: school and student group ----
+   One place decides whether a result counts, so charts, comparisons, the
+   table, exports and the student list always agree. */
+function readFilters() {
+  return { school: $("#school").value, eth: $("#eth").value, gender: $("#gender").value };
+}
+function passes(r, f) {
+  if (f.school !== "__all" && r.school !== f.school) return false;
+  if (f.eth !== "__all" && r.eth !== f.eth) return false;
+  if (f.gender !== "__all" && r.gender !== f.gender) return false;
+  return true;
+}
+// Words for the chosen student group, e.g. "Hispanic or Latino · F" ("" = everyone).
+function groupText(f) {
+  return [f.eth, f.gender].filter((v) => v !== "__all").join(" · ");
+}
+
+// Every tested student, grouped into cells.
+function aggregate(f, subjects) {
+  const wanted = new Set(subjects);
+  const cells = new Map();
+  for (const r of records) {
+    if (!wanted.has(r.subject)) continue;
+    if (!passes(r, f)) continue;
+    const key = cellKey(r.cohort, r.termIdx, r.subject);
+    if (!cells.has(key)) cells.set(key, newCell(r.cohort, r.termIdx, r.subject));
+    addToCell(cells.get(key), r);
+  }
+  cells.forEach(finishCell);
+  return cells;
+}
+
+/* Which term does a comparison end on? The next term of the "to" season
+   that comes AFTER the "from" term:
+     Fall 23-24 -> Spring  = Spring 23-24   (same school year)
+     Spring 23-24 -> Fall  = Fall 24-25     (across the summer)
+     Spring 23-24 -> Winter = Winter 24-25
+     Fall 23-24 -> Fall    = Fall 24-25     (year over year)            */
+function nextTermIdx(fromIdx, toSeason) {
+  let idx = termIndex(fallYearOf(fromIdx), toSeason);
+  if (idx <= fromIdx) idx += 3;
+  return idx;
+}
+
+// Same-students comparison: only students with a result in BOTH terms.
+// The school and student group filters use the student's "from" term details.
+// Returns Map: cellKey(cohort, fromIdx, subject) -> { from: cell, to: cell }
+function aggregateMatched(f, subjects, fromSeason, toSeason) {
+  const wanted = new Set(subjects);
+  const pairs = new Map();
+  for (const r of records) {
+    if (r.season !== fromSeason || !wanted.has(r.subject)) continue;
+    if (!passes(r, f)) continue;
+    const toIdx = nextTermIdx(r.termIdx, toSeason);
+    const later = recordIndex.get(r.sid + "|" + r.subject + "|" + toIdx);
+    if (!later) continue;
+    const key = cellKey(r.cohort, r.termIdx, r.subject);
+    if (!pairs.has(key)) pairs.set(key, { from: newCell(r.cohort, r.termIdx, r.subject), to: newCell(r.cohort, toIdx, r.subject) });
+    const p = pairs.get(key);
+    addToCell(p.from, r);
+    addToCell(p.to, later);
+  }
+  pairs.forEach((p) => { finishCell(p.from); finishCell(p.to); });
+  return pairs;
+}
+
+/* =========================================================================
+   7. CHOOSING WHICH ROWS TO SHOW
+   -------------------------------------------------------------------------
+   All the views share one idea: a list of panels, each with a list of rows.
+   A row is either one term ({cohort, termIdx}) or, in compare mode, a pair
+   of terms ({cohort, fromIdx, toIdx}).
+   ========================================================================= */
+const ui = { view: "cohort", table: false };
+
+const checkedValues = (sel) => [...document.querySelectorAll(sel + " input:checked")].map((i) => i.value);
+const selectedSubjects = () => checkedValues("#subjects");
+const selectedSeasons = () => checkedValues("#seasons");
+const allCohorts = () => [...new Set(records.map((r) => r.cohort))].sort((a, b) => a - b);
+const allTermIdxs = () => [...new Set(records.map((r) => r.termIdx))].sort((a, b) => a - b);
+const fallYears = () => [...new Set(records.map((r) => r.fallYear))].sort((a, b) => a - b);
+const presentSeasons = () => SEASONS.filter((s) => records.some((r) => r.season === s));
+
+// Gather everything the current settings need, in one object.
+function currentSettings() {
+  const s = {
+    school: $("#school").value,
+    subjects: selectedSubjects(),
+    seasons: selectedSeasons(),
+    compare: $("#compare").checked,
+    from: $("#from").value,
+    to: $("#to").value,
+    matched: $("#matched").checked,
+  };
+  s.schoolText = s.school === "__all" ? "All schools" : s.school;
+  s.filter = readFilters();
+  s.groupText = groupText(s.filter);
+  s.whoText = [s.schoolText, s.groupText].filter(Boolean).join(" · ");   // e.g. "Maple Elementary · F · EL"
+  s.cells = aggregate(s.filter, s.subjects);
+  if (s.compare && s.matched) s.pairs = aggregateMatched(s.filter, s.subjects, s.from, s.to);
+  return s;
+}
+
+// The two cells behind one compare row + subject (null if neither exists).
+function getPair(s, cohort, fromIdx, toIdx, subject) {
+  if (s.matched) return s.pairs.get(cellKey(cohort, fromIdx, subject)) || null;
+  const from = s.cells.get(cellKey(cohort, fromIdx, subject));
+  const to = s.cells.get(cellKey(cohort, toIdx, subject));
+  return from || to ? { from, to } : null;
+}
+const rowHasData = (s, row) => s.subjects.some((subj) => s.compare
+  ? getPair(s, row.cohort, row.fromIdx, row.toIdx, subj)
+  : s.cells.has(cellKey(row.cohort, row.termIdx, subj)));
+
+const compareText = (s) => `${s.from} → ${s.to}${s.matched ? " (same students)" : " (all tested)"}`;
+
+function buildPanels(s) {
+  const panels = [];
+  if (ui.view === "cohort") {
+    const choice = $("#cohort").value;
+    const cohorts = choice === "__all" ? allCohorts() : [Number(choice)];
+    for (const cohort of cohorts) {
+      let rows;
+      if (s.compare) {
+        rows = fallYears().map((fy) => {
+          const fromIdx = termIndex(fy, s.from);
+          const toIdx = nextTermIdx(fromIdx, s.to);
+          const g = gradeIn(cohort, fy);
+          return { cohort, fromIdx, toIdx, grade: g, title: termShort(fromIdx), sub: `→ ${termShort(toIdx)}`, sub2: `Grade ${gradeName(g)}` };
+        });
+      } else {
+        rows = allTermIdxs().filter((idx) => s.seasons.includes(seasonOf(idx))).map((idx) => {
+          const g = gradeIn(cohort, fallYearOf(idx));
+          return { cohort, termIdx: idx, grade: g, title: termShort(idx), sub: `Grade ${gradeName(g)}` };
+        });
+      }
+      rows = rows.filter((r) => r.grade >= 0 && r.grade <= 12 && rowHasData(s, r));
+      if (rows.length) panels.push({ title: `Class of ${cohort}`, sub: [s.whoText, s.compare ? compareText(s) : ""].filter(Boolean).join(" · "), rows });
+    }
+  } else {
+    const fy = Number($("#year").value);
+    // biggest graduation year = youngest students, so kindergarten comes first
+    const cohorts = allCohorts().sort((a, b) => b - a).filter((c) => { const g = gradeIn(c, fy); return g >= 0 && g <= 12; });
+    let rows = [];
+    if (s.compare) {
+      const fromIdx = termIndex(fy, s.from);
+      const toIdx = nextTermIdx(fromIdx, s.to);
+      rows = cohorts.map((c) => ({ cohort: c, fromIdx, toIdx, title: `Grade ${gradeName(gradeIn(c, fy))}`, sub: `Class of ${c}` }))
+        .filter((r) => rowHasData(s, r));
+      panels.push({ title: `${termShort(fromIdx)} → ${termShort(toIdx)}`, sub: `All cohorts · ${s.whoText} · ${s.matched ? "same students" : "all tested"}`, rows });
+    } else {
+      for (const c of cohorts) {
+        const mine = s.seasons.map((season) => termIndex(fy, season))
+          .map((idx) => ({ cohort: c, termIdx: idx, title: "", sub: seasonOf(idx), cont: true }))
+          .filter((r) => rowHasData(s, r));
+        if (!mine.length) continue;
+        // First row of each grade gets the grade name; the rest are continuation rows.
+        Object.assign(mine[0], { title: `Grade ${gradeName(gradeIn(c, fy))}`, sub: `Class of ${c}` + (s.seasons.length > 1 ? ` · ${mine[0].sub}` : ""), cont: false });
+        rows.push(...mine);
+      }
+      panels.push({ title: `School year ${yearShort(fy)}`, sub: `All cohorts · ${s.whoText} · ${s.seasons.join(", ")}`, rows });
+    }
+  }
+  return panels.filter((p) => p.rows.length);
+}
+
+/* =========================================================================
+   8. DRAWING THE CHARTS
+   -------------------------------------------------------------------------
+   Plain HTML boxes positioned with percentages - no chart library needed.
+   Each bar is 100% wide; each colored segment's width is that quintile's
+   share of students. Underneath, a "lane" uses the same 0-100 scale for the
+   median-percentile bubble. Faint gridlines at 20/40/60/80 mark the quintile
+   boundaries: if this group matched the national norm, every segment would
+   be about 20% wide and the bubble would sit near 50.
+   ========================================================================= */
+
+// One bar + its median lane + its N label. `label` describes the bar in tooltips.
+function barBlock(c, label) {
+  if (!c) return `<div class="plot nodata">no tests</div><div class="n"></div>`;
+  // data-drill tells the drill-down which group was clicked: cohort|term|subject|quintile.
+  // It holds no student information, so it's harmless in snapshots.
+  const drillId = (q) => `data-drill="${c.cohort}|${c.termIdx}|${esc(c.subject)}|${q}"`;
+  let left = 0;
+  const segs = QUINTILES.map((qt) => {
+    const count = c.counts[qt.key];
+    const share = pct(count, c.n);
+    const tip = `${label}\n${qt.key} (${qt.range}): ${count} of ${c.n} students (${share.toFixed(0)}%)`;
+    const html = count
+      ? `<div class="seg ${qt.key}" style="left:${left}%;width:${share}%" data-tip="${esc(tip)}" ${drillId(qt.key)} data-label="${Math.round(share)}%">${Math.round(share)}%</div>`
+      : "";
+    left += share;
+    return html;
+  }).join("");
+  const bubble = c.median === null ? "" :
+    `<div class="bubble" style="left:${Math.min(97, Math.max(3, c.median))}%"
+          data-tip="${esc(`${label}\nMedian percentile: ${c.median}`)}" ${drillId("")}>${c.median}</div>`;
+  const nTip = c.n < MIN_N ? `Fewer than ${MIN_N} students: interpret with great caution.` : `${c.n} students tested`;
+  return `<div class="plot"><div class="bar">${segs}</div><div class="lane">${bubble}</div></div>
+          <div class="n" data-tip="${esc(nTip)}" ${drillId("")}>N=${c.n}</div>`;
+}
+
+const top2 = (c) => pct(c.counts.HiAvg + c.counts.High, c.n);
+
+function renderTermCell(c, label) {
+  if (!c) return `<div class="cell">${barBlock(null)}</div>`;
+  return `<div class="cell${c.n < MIN_N ? " lown" : ""}">${barBlock(c, label)}</div>`;
+}
+
+function renderPairCell(p, s, label, subject) {
+  if (!p) return `<div class="cell">${barBlock(null)}</div>`;
+  const { from, to } = p;
+  const line = (c, season, idx) =>
+    `<div class="pline${c && c.n < MIN_N ? " lown" : ""}"><span class="ptag">${season}</span>${barBlock(c, `${termShort(idx)} · ${label}`)}</div>`;
+  let delta = `<div class="delta">change needs both terms</div>`;
+  if (from && to && from.median !== null && to.median !== null) {
+    const dm = to.median - from.median;
+    const dt = Math.round(top2(to) - top2(from));
+    const low = from.n < MIN_N || to.n < MIN_N;
+    const tip = `${subject}: ${termShort(from.termIdx)} → ${termShort(to.termIdx)}\n` +
+      `Median percentile ${from.median} → ${to.median} (${signed(dm)})\n` +
+      `HiAvg + High ${top2(from).toFixed(0)}% → ${top2(to).toFixed(0)}% (${signed(dt)} points)` +
+      (s.matched ? `\nSame ${to.n} students in both terms.` : `\nAll students tested in each term.`);
+    delta = `<div class="delta${low ? " lown" : ""}" data-tip="${esc(tip)}">
+      <span><b>${signed(dm)}</b>median %ile</span>
+      <span><b>${signed(dt)}</b>pts HiAvg+High</span></div>`;
+  }
+  const toIdx = p.to ? p.to.termIdx : nextTermIdx(p.from.termIdx, s.to);
+  const fromIdx = p.from ? p.from.termIdx : toIdx;
+  return `<div class="cell pair" data-pair="${fromIdx}|${toIdx}">${line(from, s.from, fromIdx)}${line(to, s.to, toIdx)}${delta}</div>`;
+}
+
+function renderPanel(p, s) {
+  const cols = `grid-template-columns: 8.5rem repeat(${s.subjects.length}, minmax(${s.compare ? 300 : 220}px, 1fr))`;
+  const ticks = [0, 20, 40, 60, 80, 100].map((t) => `<span style="left:${t}%">${t}</span>`).join("");
+  let html = `<div class="panel${s.compare ? " pairmode" : ""}"><div class="panel-head"><h2>${esc(p.title)}</h2><span class="sub">${esc(p.sub)}</span></div><div class="panel-body">`;
+  html += `<div class="row head" style="${cols}"><div></div>` +
+    s.subjects.map((subj) => `<div><div class="subj-head">${esc(subj)}</div><div class="axis">${ticks}</div></div>`).join("") + `</div>`;
+  for (const r of p.rows) {
+    const gradeAt = gradeIn(r.cohort, s.compare ? fallYearOf(r.fromIdx) : fallYearOf(r.termIdx));
+    const label = s.compare ? `Grade ${gradeName(gradeAt)} · Class of ${r.cohort}` : `${termShort(r.termIdx)} · Grade ${gradeName(gradeAt)} · Class of ${r.cohort}`;
+    const cellsHtml = s.subjects.map((subj) => s.compare
+      ? renderPairCell(getPair(s, r.cohort, r.fromIdx, r.toIdx, subj), s, `${label} · ${subj}`, subj)
+      : renderTermCell(s.cells.get(cellKey(r.cohort, r.termIdx, subj)), `${label} · ${subj}`)).join("");
+    html += `<div class="row${r.cont ? " cont" : ""}" style="${cols}">
+      <div class="rowlabel">${r.title ? `<strong>${esc(r.title)}</strong>` : ""}<span>${esc(r.sub)}</span>${r.sub2 ? `<span>${esc(r.sub2)}</span>` : ""}</div>${cellsHtml}</div>`;
+  }
+  return html + `</div></div>`;
+}
+
+function describeSelection(s) {
+  const what = ui.view === "cohort"
+    ? ($("#cohort").value === "__all" ? "All cohorts" : `Class of ${$("#cohort").value}`)
+    : `School year ${yearShort(Number($("#year").value))}`;
+  const terms = s.compare ? compareText(s) : `${s.seasons.join(", ")} terms`;
+  return [what, s.whoText, s.subjects.join(", "), terms].join(" · ");
+}
+
+function render() {
+  const chart = $("#chart");
+  if (!records.length) {
+    chart.innerHTML = `<p class="empty-state">${store.files.length
+      ? "No usable test results yet. Make sure you load both AssessmentResults.csv and StudentsBySchool.csv."
+      : "No data loaded yet."}</p>`;
+    $("#legend").innerHTML = $("#notes").innerHTML = $("#printHeader").innerHTML = "";
+    return;
+  }
+  closeDrawer();      // filters changed, so an open student list would be out of date
+  const s = currentSettings();
+  if (!s.subjects.length) { chart.innerHTML = `<p class="empty-state">Pick at least one subject.</p>`; return; }
+  if (!s.compare && !s.seasons.length) { chart.innerHTML = `<p class="empty-state">Pick at least one term (Fall, Winter or Spring).</p>`; return; }
+  const panels = buildPanels(s);
+
+  $("#printHeader").innerHTML = `<strong>${esc(describeSelection(s))}</strong><br>Generated ${esc(new Date().toLocaleDateString())} from NWEA MAP CDF files. Summary counts only.`;
+  $("#legend").innerHTML = `<div class="legend">` +
+    QUINTILES.map((qt) => `<span><i class="swatch" style="background:var(--q-${qt.key.toLowerCase()})"></i>${qt.key} <small>(${qt.range.replace(" percentile", "")})</small></span>`).join("") +
+    `<span><i class="swatch dot"></i>Median percentile</span>
+     <span><i class="swatch grey"></i>Fewer than ${MIN_N} students</span></div>`;
+
+  if (ui.table) {
+    chart.innerHTML = renderTable(panels, s);
+  } else {
+    chart.innerHTML = panels.length
+      ? panels.map((p) => renderPanel(p, s)).join("")
+      : `<p class="empty-state">No results for this selection.</p>`;
+    fitBarLabels();
+  }
+
+  $("#notes").innerHTML = `<div class="notes">${notesList(s).map((n) => `<p>${esc(n)}</p>`).join("")}</div>`;
+}
+
+// Show each "23%" label only if it fits inside its segment; otherwise leave the
+// segment blank (hovering still shows the number). Re-checked when the window
+// is resized, because segment widths change with it.
+function fitBarLabels() {
+  const segs = [...document.querySelectorAll("#chart .seg")];
+  // Two passes (write all, then measure all) so the browser lays the page out once, not once per bar.
+  segs.forEach((seg) => { seg.textContent = seg.dataset.label; });
+  const tooWide = segs.filter((seg) => seg.scrollWidth > seg.clientWidth);
+  tooWide.forEach((seg) => { seg.textContent = ""; });
+}
+let resizeQueued = false;
+window.addEventListener("resize", () => {
+  if (resizeQueued) return;
+  resizeQueued = true;
+  requestAnimationFrame(() => { resizeQueued = false; fitBarLabels(); });
+});
+
+// The explanatory notes under the chart (also used in the PDF).
+function notesList(s) {
+  return [
+    "Bars show the share of tested students in each NWEA achievement quintile; numbers inside are percentages. The circle is the median national percentile, on the same 0-100 scale. If a group matched national norms, each segment would be about 20% wide.",
+    s.compare ? `Comparisons: percentiles are measured against each season's national norms, so a positive change means the group gained ground on students nationally, not just that scores went up. "Same students only" counts students with a result in both terms; otherwise each term shows everyone tested then. "pts HiAvg+High" is the change in the share of students in the top two quintiles, in percentage points.` : "",
+    "One test per student per subject per term (the growth-measure test, otherwise the latest).",
+    s.groupText ? `Student group (${s.groupText}): each student's ethnicity and gender as listed for that term${s.compare && s.matched ? " (the first term, for same-students comparisons)" : ""}. Small groups are greyed out; treat them with care.` : "",
+  ].filter(Boolean);
+}
+
+/* =========================================================================
+   9. TABLE VIEW + CSV EXPORT (counts and percentages only)
+   ========================================================================= */
+const TERM_COLUMNS = ["Cohort", "Term", "Subject", "Grade", "N",
+  ...QUINTILES.map((q) => q.key + " n"), ...QUINTILES.map((q) => q.key + " %"), "Median percentile", "Note"];
+const PAIR_COLUMNS = ["Cohort", "From term", "To term", "Subject", "Grade (from)", "Students", "N from", "N to",
+  ...QUINTILES.map((q) => q.key + " % from"), ...QUINTILES.map((q) => q.key + " % to"),
+  "Median from", "Median to", "Median change", "HiAvg+High change (pts)", "Note"];
+
+const noteFor = (n) => (n < MIN_N ? `N<${MIN_N}` : "");
+
+function termRow(c) {
+  return [c.cohort, termShort(c.termIdx), c.subject, gradeName(gradeIn(c.cohort, fallYearOf(c.termIdx))), c.n,
+    ...QUINTILES.map((q) => c.counts[q.key]),
+    ...QUINTILES.map((q) => pct(c.counts[q.key], c.n).toFixed(1)),
+    c.median ?? "", noteFor(c.n, [fallYearOf(c.termIdx)])];
+}
+
+function pairRow(s, cohort, fromIdx, toIdx, subject, p) {
+  const { from, to } = p;
+  const share = (c, k) => (c ? pct(c.counts[k], c.n).toFixed(1) : "");
+  const both = from && to && from.median !== null && to.median !== null;
+  return [cohort, termShort(fromIdx), termShort(toIdx), subject, gradeName(gradeIn(cohort, fallYearOf(fromIdx))),
+    s.matched ? "Same students" : "All tested", from ? from.n : 0, to ? to.n : 0,
+    ...QUINTILES.map((q) => share(from, q.key)), ...QUINTILES.map((q) => share(to, q.key)),
+    from?.median ?? "", to?.median ?? "", both ? to.median - from.median : "",
+    from && to ? (top2(to) - top2(from)).toFixed(1) : "",
+    noteFor(Math.min(from ? from.n : 0, to ? to.n : 0), [fallYearOf(fromIdx), fallYearOf(toIdx)])];
+}
+
+// Rows of the table that match what's on screen.
+function visibleTableRows(panels, s) {
+  const rows = [];
+  for (const p of panels) for (const r of p.rows) for (const subj of s.subjects) {
+    if (s.compare) {
+      const pair = getPair(s, r.cohort, r.fromIdx, r.toIdx, subj);
+      if (pair) rows.push(pairRow(s, r.cohort, r.fromIdx, r.toIdx, subj, pair));
+    } else {
+      const c = s.cells.get(cellKey(r.cohort, r.termIdx, subj));
+      if (c) rows.push(termRow(c));
+    }
+  }
+  return rows;
+}
+
+function renderTable(panels, s) {
+  const head = s.compare ? PAIR_COLUMNS : TERM_COLUMNS;
+  const body = visibleTableRows(panels, s).map((row) => {
+    const low = String(row[row.length - 1]).includes("N<");
+    return `<tr class="${low ? "lown" : ""}">${row.map((v) => `<td>${esc(v)}</td>`).join("")}</tr>`;
+  }).join("");
+  return `<div class="table-wrap"><table class="data"><thead><tr>${head.map((h) => `<th>${esc(h)}</th>`).join("")}</tr></thead><tbody>${body}</tbody></table></div>`;
+}
+
+// Hand the browser an in-memory file (a "Blob") and click a temporary link to save it.
+function downloadFile(name, content, type) {
+  const blob = new Blob([content], { type });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = name;
+  a.click();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+const fileSafe = (text) => text.replace(/[^a-z0-9]+/gi, "_").replace(/^_|_$/g, "");
+
+// Export: ALL cohorts and terms for the chosen subjects, school and terms
+// (not just the cohort on screen), so one file covers everything.
+function exportCsv() {
+  const s = currentSettings();
+  const rows = [];
+  if (s.compare) {
+    for (const cohort of allCohorts()) for (const fy of fallYears()) for (const subj of s.subjects) {
+      const fromIdx = termIndex(fy, s.from);
+      const toIdx = nextTermIdx(fromIdx, s.to);
+      const pair = getPair(s, cohort, fromIdx, toIdx, subj);
+      if (pair) rows.push(pairRow(s, cohort, fromIdx, toIdx, subj, pair));
+    }
+  } else {
+    [...s.cells.values()]
+      .filter((c) => s.seasons.includes(seasonOf(c.termIdx)))
+      .sort((a, b) => a.cohort - b.cohort || a.termIdx - b.termIdx || a.subject.localeCompare(b.subject))
+      .forEach((c) => rows.push(termRow(c)));
+  }
+  const quote = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+  const head = ["School", "Student group", ...(s.compare ? PAIR_COLUMNS : TERM_COLUMNS)];
+  const group = s.groupText || "All students";
+  const lines = [head.map(quote).join(","), ...rows.map((r) => [s.schoolText, group, ...r].map(quote).join(","))];
+  const kind = s.compare ? `${s.from}_to_${s.to}${s.matched ? "_same_students" : ""}` : s.seasons.join("_");
+  downloadFile(`map_cohort_summary_${fileSafe(s.whoText)}_${kind}.csv`, lines.join("\r\n"), "text/csv");
+}
+
+/* =========================================================================
+   10. PRINT + OFFLINE SNAPSHOT
+   -------------------------------------------------------------------------
+   Print uses the browser's own print dialog; the print rules in <style>
+   hide the controls and switch to light colors. Choose "Save as PDF" there
+   to get a PDF.
+
+   A snapshot is a brand-new HTML file built from what is on screen right now:
+   the same styles, the chart, legend and notes, plus the small tooltip code.
+   It contains only the numbers you can see - no student rows and none of
+   the code that reads CSV files - so it is safe to email or post.
+   ========================================================================= */
+function installTooltip() {
+  // Written to stand on its own, because a copy of it goes into snapshots.
+  const tip = document.getElementById("tip");
+  document.addEventListener("mouseover", (e) => {
+    const target = e.target.closest("[data-tip]");
+    if (!target) { tip.style.display = "none"; return; }
+    tip.textContent = target.dataset.tip;
+    tip.style.display = "block";
+  });
+  document.addEventListener("mousemove", (e) => {
+    if (tip.style.display !== "block") return;
+    const x = Math.min(e.clientX + 14, window.innerWidth - tip.offsetWidth - 8);
+    const y = e.clientY + 18 + tip.offsetHeight > window.innerHeight ? e.clientY - tip.offsetHeight - 10 : e.clientY + 18;
+    tip.style.left = x + "px";
+    tip.style.top = y + "px";
+  });
+}
+
+function buildSnapshot() {
+  const s = currentSettings();
+  const title = describeSelection(s);
+  const css = document.querySelector("style").textContent;
+  const theme = document.documentElement.dataset.theme;
+  // Note "<\/script>": writing the closing tag plainly here would end THIS
+  // page's script early, so the slash is escaped.
+  return `<!doctype html>
+<html lang="en"${theme ? ` data-theme="${theme}"` : ""}>
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MAP cohort snapshot - ${esc(title)}</title>
+<style>${css}</style>
+</head>
+<body>
+<main>
+  <h1>MAP Cohort Viewer: snapshot</h1>
+  <div id="printHeader" class="show">${$("#printHeader").innerHTML}</div>
+  ${$("#legend").innerHTML}
+  ${$("#chart").innerHTML}
+  ${$("#notes").innerHTML}
+</main>
+<div id="tip" role="tooltip"></div>
+<script>(${installTooltip.toString()})();<\/script>
+</body>
+</html>`;
+}
+
+function downloadSnapshot() {
+  const s = currentSettings();
+  downloadFile(`map_cohort_snapshot_${fileSafe(describeSelection(s)).slice(0, 80)}.html`, buildSnapshot(), "text/html");
+}
+
+/* =========================================================================
+   10b. DOWNLOAD AS PDF (built here - no library, works offline)
+   -------------------------------------------------------------------------
+   A PDF file is mostly plain text: a list of numbered "objects" (the
+   document, its pages, its fonts) and, for each page, a list of drawing
+   commands such as "fill this rectangle red" or "write this text here".
+   Our charts are only rectangles, circles, lines and text, so we can write
+   those commands ourselves.
+
+   Two things to know about PDF drawing:
+   * Measurements are in "points" (72 per inch). A landscape US Letter page
+     is 792 x 612 points.
+   * y = 0 is the BOTTOM of the page. Our code thinks top-down, so every
+     drawing helper flips y with  PH - y.
+   We use Helvetica, one of the fonts every PDF reader has built in, so no
+   font has to be packed into the file.
+   ========================================================================= */
+const PW = 792, PH = 612, PM = 36;   // page width, height, margin (points)
+const PDF_Q = { Low: "#8e1b1b", LoAvg: "#e97b26", Avg: "#7d7c22", HiAvg: "#357a35", High: "#1f5fa8" };
+const P_INK = "#1d1f23", P_INK2 = "#4b4f57", P_MUTED = "#737883", P_LINE = "#d9dce2",
+      P_WHITE = "#ffffff";
+
+// Helvetica character widths (from Adobe's font metrics) for characters
+// " " through "~", in thousandths of the font size. Used to center and
+// right-align text and to wrap long notes.
+const HELV_WIDTHS = [278,278,355,556,556,889,667,191,333,333,389,584,278,333,278,278,
+  556,556,556,556,556,556,556,556,556,556,278,278,584,584,584,556,1015,
+  667,667,722,722,667,611,778,722,278,500,667,556,833,722,778,667,778,722,667,611,722,667,944,667,667,611,
+  278,278,278,469,556,333,
+  556,556,500,556,556,278,556,556,222,222,500,222,833,556,556,556,556,333,500,278,556,500,722,500,500,500,
+  334,260,334,584];
+function textWidth(str, size, bold) {
+  let units = 0;
+  for (const ch of str) {
+    const code = ch.charCodeAt(0);
+    units += code >= 32 && code <= 126 ? HELV_WIDTHS[code - 32] : code === 0xb7 ? 278 : 556;
+  }
+  return (units * size / 1000) * (bold ? 1.06 : 1);   // bold is a little wider
+}
+// The built-in fonts only know Western European characters, so swap the few
+// special ones we use for plain equivalents.
+function pdfSafe(str) {
+  return String(str).replace(/→/g, "to").replace(/[−–—]/g, "-")
+    .replace(/⚠/g, "!").replace(/[^\x20-\xff]/g, "?");
+}
+// Inside PDF text, ( ) and \ have special meaning, so they get a backslash.
+const pdfEscape = (str) => str.replace(/[\\()]/g, (c) => "\\" + c);
+const num = (n) => String(Math.round(n * 100) / 100);
+function rgb(color) {
+  if (Array.isArray(color)) return color.map((v) => v.toFixed(3)).join(" ");
+  const n = parseInt(color.slice(1), 16);
+  return [(n >> 16) & 255, (n >> 8) & 255, n & 255].map((v) => (v / 255).toFixed(3)).join(" ");
+}
+// Grey version of a color, for bars with too few students.
+function greyed(hex) {
+  const n = parseInt(hex.slice(1), 16);
+  const y = (0.3 * ((n >> 16) & 255) + 0.59 * ((n >> 8) & 255) + 0.11 * (n & 255)) / 255;
+  const v = y + (1 - y) * 0.55;
+  return [v, v, v];
+}
+
+// One page = a list of drawing commands ("ops"). Coordinates are top-down.
+class PdfPage {
+  constructor() { this.ops = []; }
+  rect(x, y, w, h, fill) {
+    this.ops.push(`${rgb(fill)} rg ${num(x)} ${num(PH - y - h)} ${num(w)} ${num(h)} re f`);
+  }
+  line(x1, y1, x2, y2, color, width = 0.5) {
+    this.ops.push(`${rgb(color)} RG ${width} w ${num(x1)} ${num(PH - y1)} m ${num(x2)} ${num(PH - y2)} l S`);
+  }
+  // A circle is drawn as four curves; 0.5523 is the standard "magic number"
+  // that makes curves look like a quarter circle.
+  circle(cx, cy, r, fill, stroke, width = 1) {
+    const k = 0.5523 * r, X = cx, Y = PH - cy;
+    const p = (a, b) => `${num(a)} ${num(b)}`;
+    this.ops.push(`${rgb(fill)} rg ${rgb(stroke)} RG ${width} w ${p(X + r, Y)} m ` +
+      `${p(X + r, Y + k)} ${p(X + k, Y + r)} ${p(X, Y + r)} c ${p(X - k, Y + r)} ${p(X - r, Y + k)} ${p(X - r, Y)} c ` +
+      `${p(X - r, Y - k)} ${p(X - k, Y - r)} ${p(X, Y - r)} c ${p(X + k, Y - r)} ${p(X + r, Y - k)} ${p(X + r, Y)} c B`);
+  }
+  // y is the text's baseline. Returns the width drawn.
+  text(x, y, str, size, { bold = false, color = P_INK, align = "left" } = {}) {
+    const s = pdfSafe(str);
+    const w = textWidth(s, size, bold);
+    const x0 = align === "center" ? x - w / 2 : align === "right" ? x - w : x;
+    this.ops.push(`BT ${rgb(color)} rg /${bold ? "F2" : "F1"} ${size} Tf ${num(x0)} ${num(PH - y)} Td (${pdfEscape(s)}) Tj ET`);
+    return w;
+  }
+}
+
+// Split a long sentence into lines that fit a width.
+function wrapText(str, size, maxW) {
+  const lines = [];
+  let line = "";
+  for (const word of pdfSafe(str).split(" ")) {
+    const test = line ? line + " " + word : word;
+    if (textWidth(test, size) > maxW && line) { lines.push(line); line = word; }
+    else line = test;
+  }
+  if (line) lines.push(line);
+  return lines;
+}
+
+// Turn finished pages into the bytes of a .pdf file.
+function assemblePdf(pages, title) {
+  // Objects 1-4 are fixed; each page then gets two: the page and its drawing commands.
+  const objs = [
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "", // 2: the page list, filled in below
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>",
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica-Bold /Encoding /WinAnsiEncoding >>",
+  ];
+  const kids = [];
+  pages.forEach((page, i) => {
+    const pageNum = 5 + 2 * i, contentNum = 6 + 2 * i;
+    kids.push(`${pageNum} 0 R`);
+    const stream = page.ops.join("\n");
+    objs[pageNum - 1] = `<< /Type /Page /Parent 2 0 R /MediaBox [0 0 ${PW} ${PH}] ` +
+      `/Resources << /Font << /F1 3 0 R /F2 4 0 R >> >> /Contents ${contentNum} 0 R >>`;
+    objs[contentNum - 1] = `<< /Length ${stream.length} >>\nstream\n${stream}\nendstream`;
+  });
+  objs[1] = `<< /Type /Pages /Kids [${kids.join(" ")}] /Count ${pages.length} >>`;
+  objs.push(`<< /Title (${pdfEscape(pdfSafe(title))}) /Producer (MAP Cohort Viewer) >>`);
+  const infoNum = objs.length;
+
+  // The "xref" table at the end lists where each object starts (in bytes),
+  // so a PDF reader can jump straight to any page.
+  let out = "%PDF-1.4\n%\xe2\xe3\xcf\xd3\n";
+  const offsets = [];
+  objs.forEach((o, i) => { offsets.push(out.length); out += `${i + 1} 0 obj\n${o}\nendobj\n`; });
+  const xrefAt = out.length;
+  out += `xref\n0 ${objs.length + 1}\n0000000000 65535 f \n` +
+    offsets.map((o) => String(o).padStart(10, "0") + " 00000 n \n").join("");
+  out += `trailer\n<< /Size ${objs.length + 1} /Root 1 0 R /Info ${infoNum} 0 R >>\nstartxref\n${xrefAt}\n%%EOF\n`;
+  // Every character we wrote is a single byte (0-255), so copy them across.
+  const bytes = new Uint8Array(out.length);
+  for (let i = 0; i < out.length; i++) bytes[i] = out.charCodeAt(i) & 255;
+  return bytes;
+}
+
+// Draw the current view (same settings and rows as the screen) into pages.
+function buildPdf() {
+  const s = currentSettings();
+  const panels = buildPanels(s);
+  const title = describeSelection(s);
+  const pages = [];
+  let pg, y;
+  const bottom = PH - PM - 14;           // leave room for the footer
+  const newPage = () => { pg = new PdfPage(); pages.push(pg); y = PM; };
+
+  // Column layout: a label column, then one column per subject.
+  const labelW = 98, gap = 14, nW = 34, tagW = s.compare ? 28 : 0;
+  const colW = (PW - 2 * PM - labelW - gap * (s.subjects.length - 1)) / s.subjects.length;
+  const plotW = colW - tagW - nW - 4;
+  const colX = (i) => PM + labelW + i * (colW + gap);
+  const plotX = (i) => colX(i) + tagW;
+  const rowH = s.compare ? 74 : 34;
+
+  // One bar + median lane + N label; top edge at yTop. 28 points tall.
+  function bar(x, yTop, c) {
+    if (!c) { pg.text(x, yTop + 9, "no tests", 7, { color: P_MUTED }); return; }
+    const low = c.n < MIN_N;
+    for (let t = 0; t <= 100; t += 20) pg.line(x + plotW * t / 100, yTop - 1, x + plotW * t / 100, yTop + 28, P_LINE, 0.4);
+    let left = 0;
+    const present = QUINTILES.filter((q) => c.counts[q.key]);
+    present.forEach((q, i) => {
+      const share = pct(c.counts[q.key], c.n);
+      const w = plotW * share / 100;
+      const gapW = i < present.length - 1 ? 1 : 0;            // thin white gap between segments
+      pg.rect(x + left, yTop, Math.max(0, w - gapW), 11, low ? greyed(PDF_Q[q.key]) : PDF_Q[q.key]);
+      const label = Math.round(share) + "%";
+      if (textWidth(label, 6.5, true) + 3 <= w) pg.text(x + left + w / 2, yTop + 8, label, 6.5,   // only if it fits
+        { bold: true, align: "center", color: low || q.key === "LoAvg" ? P_INK : P_WHITE });
+      left += w;
+    });
+    if (c.median !== null) {
+      const cx = x + plotW * Math.min(97, Math.max(3, c.median)) / 100;
+      pg.circle(cx, yTop + 19.5, 6.5, P_WHITE, low ? P_MUTED : P_INK, 1);
+      pg.text(cx, yTop + 21.8, String(c.median), 6.2, { bold: true, align: "center", color: low ? P_MUTED : P_INK });
+    }
+    pg.text(x + plotW + 4, yTop + 8.5, `N=${c.n}`, 7, { color: low ? P_MUTED : P_INK2 });
+  }
+
+  function panelHead(p, continued) {
+    const w = pg.text(PM, y + 12, p.title + (continued ? " (continued)" : ""), 12, { bold: true });
+    pg.text(PM + w + 8, y + 12, p.sub, 8, { color: P_MUTED });
+    y += 22;
+    s.subjects.forEach((subj, i) => {
+      pg.text(colX(i), y + 8, subj, 9, { bold: true });
+      for (let t = 0; t <= 100; t += 20) {
+        pg.text(plotX(i) + plotW * t / 100, y + 18, String(t), 6,
+          { color: P_MUTED, align: t === 0 ? "left" : t === 100 ? "right" : "center" });
+      }
+    });
+    y += 22;
+    pg.line(PM, y, PW - PM, y, P_LINE, 0.8);
+    y += 1;
+  }
+
+  // ---- Page 1 header + legend ----
+  newPage();
+  pg.text(PM, y + 14, "MAP Cohort Viewer", 16, { bold: true });
+  pg.text(PM, y + 30, title, 9, { bold: true, color: P_INK2 });
+  pg.text(PM, y + 42, `Generated ${new Date().toLocaleDateString()} from NWEA MAP CDF files. Summary counts only.`, 8, { color: P_MUTED });
+  y += 54;
+  let lx = PM;
+  for (const q of QUINTILES) {
+    pg.rect(lx, y, 8, 8, PDF_Q[q.key]);
+    lx += 12 + pg.text(lx + 12, y + 7, `${q.key} (${q.range.replace(" percentile", "")})`, 7.5, { color: P_INK2 }) + 12;
+  }
+  pg.circle(lx + 4, y + 4, 4, P_WHITE, P_INK, 1);
+  lx += 12 + pg.text(lx + 12, y + 7, "Median percentile", 7.5, { color: P_INK2 }) + 12;
+  pg.rect(lx, y, 8, 8, greyed("#7d7c22"));
+  pg.text(lx + 12, y + 7, `Fewer than ${MIN_N} students`, 7.5, { color: P_INK2 });
+  y += 20;
+
+  if (!panels.length) pg.text(PM, y + 20, "No results for this selection.", 10, { color: P_INK2 });
+
+  // ---- Panels and rows, starting a new page whenever the next row won't fit ----
+  for (const p of panels) {
+    if (y + 46 + rowH > bottom) newPage();
+    panelHead(p, false);
+    for (const r of p.rows) {
+      if (y + rowH > bottom) { newPage(); panelHead(p, true); }
+      if (!r.cont) pg.line(PM, y, PW - PM, y, P_LINE, 0.5);
+
+      // Row label
+      let ly = y + 12;
+      if (r.title) { pg.text(PM, ly, r.title, 8.5, { bold: true }); ly += 10; }
+      pg.text(PM, ly, r.sub, 7, { color: P_MUTED }); ly += 9;
+      if (r.sub2) pg.text(PM, ly, r.sub2, 7, { color: P_MUTED });
+
+      s.subjects.forEach((subj, i) => {
+        if (!s.compare) { bar(plotX(i), y + 4, s.cells.get(cellKey(r.cohort, r.termIdx, subj))); return; }
+        const pair = getPair(s, r.cohort, r.fromIdx, r.toIdx, subj);
+        pg.text(colX(i), y + 12, s.from, 7, { color: P_MUTED });
+        pg.text(colX(i), y + 42, s.to, 7, { color: P_MUTED });
+        bar(plotX(i), y + 4, pair && pair.from);
+        bar(plotX(i), y + 34, pair && pair.to);
+        if (pair && pair.from && pair.to && pair.from.median !== null && pair.to.median !== null) {
+          const dm = pair.to.median - pair.from.median;
+          const dt = Math.round(top2(pair.to) - top2(pair.from));
+          const low = pair.from.n < MIN_N || pair.to.n < MIN_N;
+          const w = pg.text(plotX(i), y + 69, signed(dm), 8, { bold: true, color: low ? P_MUTED : P_INK });
+          const w2 = pg.text(plotX(i) + w + 3, y + 69, "median %ile", 7, { color: P_INK2 });
+          const x3 = plotX(i) + w + w2 + 16;
+          const w3 = pg.text(x3, y + 69, signed(dt), 8, { bold: true, color: low ? P_MUTED : P_INK });
+          pg.text(x3 + w3 + 3, y + 69, "pts HiAvg+High", 7, { color: P_INK2 });
+        } else if (pair) {
+          pg.text(plotX(i), y + 69, "change needs both terms", 7, { color: P_MUTED });
+        }
+      });
+      y += rowH;
+    }
+    y += 12;
+  }
+
+  // ---- Notes (wrapped), then a footer with page numbers on every page ----
+  const noteLines = notesList(s).flatMap((n) => [...wrapText(n, 7.5, PW - 2 * PM), ""]);
+  if (y + 14 > bottom) newPage();
+  pg.line(PM, y, PW - PM, y, P_LINE, 0.5);
+  y += 12;
+  for (const line of noteLines) {
+    if (y > bottom) newPage();
+    if (line) pg.text(PM, y, line, 7.5, { color: P_INK2 });
+    y += line ? 10 : 4;
+  }
+  pages.forEach((p, i) => {
+    p.text(PM, PH - PM + 14, "MAP Cohort Viewer - summary counts only, no student-level data", 7, { color: P_MUTED });
+    p.text(PW - PM, PH - PM + 14, `Page ${i + 1} of ${pages.length}`, 7, { color: P_MUTED, align: "right" });
+  });
+  return assemblePdf(pages, title);
+}
+
+function downloadPdf() {
+  const s = currentSettings();
+  downloadFile(`map_cohort_${fileSafe(describeSelection(s)).slice(0, 80)}.pdf`, buildPdf(), "application/pdf");
+}
+
+/* =========================================================================
+   11. LIGHT / DARK THEME
+   -------------------------------------------------------------------------
+   "Auto" follows the computer's setting. Light/Dark set a data-theme
+   attribute on <html>, which the color tokens in <style> respond to.
+   ========================================================================= */
+function applyTheme(choice) {
+  if (choice === "light" || choice === "dark") document.documentElement.dataset.theme = choice;
+  else delete document.documentElement.dataset.theme;
+  document.querySelectorAll("[data-theme-choice]").forEach((b) =>
+    b.setAttribute("aria-pressed", String(b.dataset.themeChoice === (choice || "auto"))));
+  try { localStorage.setItem("mapcv-theme", choice); } catch (e) {}
+}
+
+/* =========================================================================
+   12. WIRING IT ALL UP
+   ========================================================================= */
+
+// Fill a <select> with options, keeping the current choice if it still exists.
+function fillSelect(select, options, fallback) {
+  const previous = select.value;
+  select.innerHTML = options.map(([value, text]) => `<option value="${esc(value)}">${esc(text)}</option>`).join("");
+  const values = options.map(([v]) => String(v));
+  select.value = values.includes(previous) ? previous : String(fallback);
+}
+
+// Fill a group of checkboxes, keeping previous ticks (or using defaults the first time).
+function fillChecks(box, values, isDefault) {
+  const before = new Set(checkedValues("#" + box.id));
+  const firstTime = !box.querySelector("input");
+  box.innerHTML = values.map((v) => {
+    const on = firstTime || !before.size ? isDefault(v) : before.has(v);
+    return `<label class="check"><input type="checkbox" value="${esc(v)}"${on ? " checked" : ""}> ${esc(v)}</label>`;
+  }).join(" ");
+}
+
+function refreshControls() {
+  $("#controls").hidden = !records.length;
+  if (!records.length) return;
+  const years = fallYears();
+  const latest = years[years.length - 1];
+
+  // Cohort list. Default: the cohort with the most terms of data.
+  const termsPerCohort = new Map();
+  for (const r of records) {
+    if (!termsPerCohort.has(r.cohort)) termsPerCohort.set(r.cohort, new Set());
+    termsPerCohort.get(r.cohort).add(r.termIdx);
+  }
+  const cohorts = allCohorts();
+  let defaultCohort = cohorts[0];
+  for (const c of cohorts) if (termsPerCohort.get(c).size >= termsPerCohort.get(defaultCohort).size) defaultCohort = c;
+  fillSelect($("#cohort"), [["__all", "All cohorts"], ...cohorts.map((c) => {
+    const g = gradeIn(c, latest);
+    const when = g > 12 ? "graduated" : g < 0 ? "not yet in K" : `grade ${gradeName(g)} in ${yearShort(latest)}`;
+    return [c, `Class of ${c} (${when})`];
+  })], defaultCohort);
+
+  fillSelect($("#year"), years.map((y) => [y, yearShort(y)]).reverse(), latest);
+
+  const schools = [...new Set(records.map((r) => r.school))].sort();
+  fillSelect($("#school"), [["__all", "All schools"], ...schools.map((sc) => [sc, sc])], "__all");
+
+  // Student group menus, filled from whatever values the files contain.
+  const valuesOf = (key) => [...new Set(records.map((r) => r[key]))].sort();
+  fillSelect($("#eth"), [["__all", "All"], ...valuesOf("eth").map((v) => [v, v])], "__all");
+  fillSelect($("#gender"), [["__all", "All"], ...valuesOf("gender").map((v) => [v, v])], "__all");
+  // Terms: Fall ticked by default (or the first season present).
+  const seasons = presentSeasons();
+  fillChecks($("#seasons"), seasons, (v) => v === (seasons.includes("Fall") ? "Fall" : seasons[0]));
+  // Compare: Fall -> Spring by default when both exist.
+  const opts = seasons.map((x) => [x, x]);
+  fillSelect($("#from"), opts, seasons.includes("Fall") ? "Fall" : seasons[0]);
+  fillSelect($("#to"), opts, seasons.includes("Spring") ? "Spring" : seasons[seasons.length - 1]);
+
+  // Subjects: Reading and Mathematics ticked by default.
+  const subjects = [...new Set(records.map((r) => r.subject))].sort((a, b) => {
+    const ia = PREFERRED_SUBJECTS.indexOf(a), ib = PREFERRED_SUBJECTS.indexOf(b);
+    return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+  });
+  fillChecks($("#subjects"), subjects, (v) => /^(read|math)/i.test(v));
+}
+
+function renderStatus() {
+  const box = $("#status");
+  if (!store.files.length) { box.innerHTML = ""; return; }
+  const items = store.files.map((f) => {
+    if (["AssessmentResults", "StudentsBySchool"].includes(f.kind)) {
+      const extra = [f.dupes ? `${f.dupes.toLocaleString()} duplicate rows skipped` : "",
+                     f.skipped ? `${f.skipped.toLocaleString()} summer rows skipped` : "",
+                     f.badTerm ? `${f.badTerm.toLocaleString()} rows with unreadable TermName` : ""].filter(Boolean).join(", ");
+      return `<li><b>${esc(f.name)}</b>: ${f.kind}, ${f.rows.toLocaleString()} rows${extra ? ` (${extra})` : ""}</li>`;
+    }
+    return `<li class="${f.kind === "error" ? "bad" : ""}"><b>${esc(f.name)}</b>: ${esc(f.message)}</li>`;
+  }).join("");
+  const hasTests = store.files.some((f) => f.kind === "AssessmentResults");
+  const hasEnroll = store.files.some((f) => f.kind === "StudentsBySchool");
+  const warn = !hasTests ? `<p class="bad">Still needed: AssessmentResults.csv</p>`
+             : !hasEnroll ? `<p class="bad">Still needed: StudentsBySchool.csv (grades live only there)</p>` : "";
+  const q = quality;
+  const bySeason = q.bySeason ? SEASONS.map((x) => `${x} ${q.bySeason[x].toLocaleString()}`).join(", ") : "";
+  const rowsQ = [
+    ["Test results used in charts", q.testsKept, bySeason],
+    ["Extra tests set aside (re-tests; kept one per student/subject/term)", q.extraTests],
+    ["Tests with no matching StudentsBySchool row (no grade)", q.noGradeMatch],
+    ["Tests for grades outside K-12 (e.g. PK)", q.gradeOutOfRange],
+    ["Tests with no achievement quintile", q.noQuintile],
+    ["Students listed in two grades in the same term (higher grade used)", q.gradeConflicts],
+  ].map(([label, v, extra]) => `<tr><td>${label}${extra ? ` <small>(${extra})</small>` : ""}</td><td>${(v || 0).toLocaleString()}</td></tr>`).join("");
+  box.innerHTML = `<ul>${items}</ul>${warn}
+    <details class="quality"><summary>Data checks</summary><table>${rowsQ}</table></details>`;
+}
+
+/* ---- Reading .zip files ------------------------------------------------
+   A zip file is a row of compressed files followed by a "central directory":
+   a table of contents at the very end listing each file's name, size and
+   where it starts. We read that table, then unpack each CSV. Unpacking
+   ("inflating") uses DecompressionStream, which is built into modern
+   browsers, so no library is needed. Everything stays in memory in this tab.
+   ------------------------------------------------------------------------ */
+async function csvsFromZip(file) {
+  if (typeof DecompressionStream === "undefined") {
+    throw new Error("this browser can't unzip files. Please unzip it first and drop the CSVs.");
+  }
+  const buf = new Uint8Array(await file.arrayBuffer());
+  const view = new DataView(buf.buffer);
+  const u16 = (at) => view.getUint16(at, true);   // zip numbers are "little-endian"
+  const u32 = (at) => view.getUint32(at, true);
+
+  // 1. Find the "end of central directory" record: it starts with the bytes
+  //    PK\x05\x06 and sits in the last ~64 KB of the file.
+  let end = -1;
+  for (let i = buf.length - 22; i >= Math.max(0, buf.length - 65557); i--) {
+    if (u32(i) === 0x06054b50) { end = i; break; }
+  }
+  if (end < 0) throw new Error("it doesn't look like a zip file.");
+  const count = u16(end + 10);
+  let p = u32(end + 16);                           // where the table of contents starts
+  if (p === 0xffffffff) throw new Error("it is too large (ZIP64). Please unzip it first.");
+
+  // 2. Walk the table of contents, one entry per file.
+  const out = [];
+  for (let k = 0; k < count; k++) {
+    if (u32(p) !== 0x02014b50) throw new Error("its table of contents is damaged.");
+    const flags = u16(p + 8), method = u16(p + 10), compressedSize = u32(p + 20);
+    const nameLen = u16(p + 28), extraLen = u16(p + 30), commentLen = u16(p + 32);
+    const localHeader = u32(p + 42);
+    const path = new TextDecoder().decode(buf.subarray(p + 46, p + 46 + nameLen));
+    p += 46 + nameLen + extraLen + commentLen;
+    // Skip folders, non-CSV files, and the hidden copies Macs add (__MACOSX).
+    if (!/\.csv$/i.test(path) || path.includes("__MACOSX/")) continue;
+    if (flags & 1) { out.push({ path, error: "is password-protected; unzip it first." }); continue; }
+
+    // 3. The file's data starts after its own small "local header".
+    const start = localHeader + 30 + u16(localHeader + 26) + u16(localHeader + 28);
+    const data = buf.subarray(start, start + compressedSize);
+    let bytes;
+    if (method === 0) bytes = data;                 // stored without compression
+    else if (method === 8) {                        // "deflate", the usual zip compression
+      const stream = new Blob([data]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+      bytes = new Uint8Array(await new Response(stream).arrayBuffer());
+    } else { out.push({ path, error: `uses a compression type this page can't read (${method}); unzip it first.` }); continue; }
+    out.push({ path, text: new TextDecoder().decode(bytes) });
+  }
+  return out;
+}
+
+/* ---- Dropped folders ---------------------------------------------------
+   When a folder is dropped, the browser hands us "entries" we can walk like
+   a file tree. This collects every file inside (including sub-folders).
+   The entries must be grabbed immediately during the drop event, which is
+   why the first line runs before anything is awaited.
+   ------------------------------------------------------------------------ */
+async function filesFromDrop(dataTransfer) {
+  const entries = [...dataTransfer.items].map((item) => item.webkitGetAsEntry && item.webkitGetAsEntry()).filter(Boolean);
+  if (!entries.length) return [...dataTransfer.files];
+  const files = [];
+  async function walk(entry) {
+    if (entry.isFile) files.push(await new Promise((ok, fail) => entry.file(ok, fail)));
+    else if (entry.isDirectory) {
+      const reader = entry.createReader();
+      let batch;
+      do {   // folders are listed in batches; keep asking until one comes back empty
+        batch = await new Promise((ok, fail) => reader.readEntries(ok, fail));
+        for (const e of batch) await walk(e);
+      } while (batch.length);
+    }
+  }
+  for (const e of entries) await walk(e);
+  return files;
+}
+
+async function handleFiles(fileList) {
+  const files = [...fileList].filter((f) => /\.(csv|zip)$/i.test(f.name));
+  if (!files.length) {
+    $("#status").innerHTML = `<p class="bad">No .csv or .zip files found in what was dropped.</p>`;
+    return;
+  }
+  $("#status").innerHTML = `<p>Reading ${files.length} file(s)...</p>`;
+  for (const file of files) {
+    // Everything below reads the files inside the browser only.
+    if (/\.zip$/i.test(file.name)) {
+      try {
+        const inner = await csvsFromZip(file);
+        if (!inner.length) store.files.push({ name: file.name, kind: "unknown", message: "No CSV files inside this zip." });
+        for (const c of inner) {
+          const label = `${file.name} › ${c.path}`;
+          if (c.error) store.files.push({ name: label, kind: "error", message: `This file ${c.error}` });
+          else loadCsvText(label, c.text);
+        }
+      } catch (err) {
+        store.files.push({ name: file.name, kind: "error", message: `Couldn't open this zip: ${err.message}` });
+      }
+    } else {
+      loadCsvText(file.name, await file.text());
+    }
+  }
+  rebuild();
+  refreshControls();
+  renderStatus();
+  render();
+}
+
+// ---- Drop zone + file picker ----
+const drop = $("#drop");
+["dragenter", "dragover"].forEach((ev) => drop.addEventListener(ev, (e) => { e.preventDefault(); drop.classList.add("over"); }));
+["dragleave", "drop"].forEach((ev) => drop.addEventListener(ev, () => drop.classList.remove("over")));
+drop.addEventListener("drop", async (e) => { e.preventDefault(); handleFiles(await filesFromDrop(e.dataTransfer)); });
+// Stop the browser from opening a file that misses the drop zone.
+window.addEventListener("dragover", (e) => e.preventDefault());
+window.addEventListener("drop", (e) => e.preventDefault());
+$("#picker").addEventListener("change", (e) => { handleFiles(e.target.files); e.target.value = ""; });
+
+// ---- Controls ----
+document.querySelectorAll("[data-view]").forEach((btn) => btn.addEventListener("click", () => {
+  ui.view = btn.dataset.view;
+  document.querySelectorAll("[data-view]").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  $("#cohortPick").hidden = ui.view !== "cohort";
+  $("#yearPick").hidden = ui.view !== "year";
+  render();
+}));
+$("#compare").addEventListener("change", () => {
+  $("#comparePick").hidden = !$("#compare").checked;
+  $("#seasonPick").hidden = $("#compare").checked;
+  render();
+});
+["#cohort", "#year", "#school", "#eth", "#gender", "#from", "#to", "#matched"].forEach((sel) => $(sel).addEventListener("change", render));
+$("#subjects").addEventListener("change", render);
+$("#seasons").addEventListener("change", render);
+$("#tableToggle").addEventListener("click", () => {
+  ui.table = !ui.table;
+  $("#tableToggle").textContent = ui.table ? "Show as chart" : "Show as table";
+  render();
+});
+$("#export").addEventListener("click", exportCsv);
+$("#print").addEventListener("click", () => window.print());
+$("#pdf").addEventListener("click", downloadPdf);
+$("#snapshot").addEventListener("click", downloadSnapshot);
+$("#clear").addEventListener("click", () => {
+  store.files = []; store.tests.clear(); store.enrollments.clear();
+  records = []; recordIndex = new Map(); studentNames = new Map(); quality = {};
+  closeDrawer();
+  $("#subjects").innerHTML = ""; $("#seasons").innerHTML = "";
+  refreshControls(); renderStatus(); render();
+});
+
+// ---- Theme buttons ----
+document.querySelectorAll("[data-theme-choice]").forEach((b) =>
+  b.addEventListener("click", () => applyTheme(b.dataset.themeChoice)));
+applyTheme(document.documentElement.dataset.theme || "auto");
+
+installTooltip();
+
+/* =========================================================================
+   13. STUDENT DRILL-DOWN (district staff only, off by default)
+   -------------------------------------------------------------------------
+   With "Show students" ticked, clicking a bar segment, median circle or N
+   opens a side panel listing the students behind it. The list is built on
+   the spot from `records` (which never leave this tab). The panel sits
+   outside <main>, so snapshots never copy it, and print rules hide it.
+   The switch is deliberately NOT remembered: every visit starts with it off.
+   ========================================================================= */
+const drill = { ctx: null, rows: [], cols: [], filters: [], sortKey: null, sortDir: 1 };
+const QUINT_INDEX = Object.fromEntries(QUINTILES.map((q, i) => [q.key, i]));
+const nameOf = (sid) => studentNames.get(sid) || "(no name found)";
+const qBadge = (q) => (q ? `<span class="qdot" style="background:var(--q-${q.toLowerCase()})"></span>${q}` : "");
+
+function closeDrawer() { $("#drawer").hidden = true; drill.ctx = null; }
+
+// ctx: { cohort, termIdx, subject, quint, pair: {fromIdx, toIdx} | null }
+function openDrill(ctx) {
+  const f = readFilters();
+  const schoolText = [f.school === "__all" ? "All schools" : f.school, groupText(f)].filter(Boolean).join(" · ");
+  const inCell = (r, idx) => r.cohort === ctx.cohort && r.termIdx === idx && r.subject === ctx.subject && passes(r, f);
+  const base = [
+    { key: "name", label: "Student" },
+    { key: "sid", label: "StudentID" },
+    { key: "school", label: "School" },
+  ];
+
+  if (!ctx.pair) {
+    // ---- One term: everyone in this cohort/term/subject ----
+    drill.rows = records.filter((r) => inCell(r, ctx.termIdx)).map((r) => ({
+      name: nameOf(r.sid), sid: r.sid, school: r.school, rit: r.rit, pctile: r.pctile, quint: r.quint }));
+    drill.cols = [...base,
+      { key: "rit", label: "RIT", num: true },
+      { key: "pctile", label: "Percentile", num: true },
+      { key: "quint", label: "Quintile", quint: true }];
+    drill.filters = [["all", "All students"], ...QUINTILES.map((q) => [`q:${q.key}`, `${q.key} only`])];
+    $("#drawerFilter").innerHTML = drill.filters.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+    $("#drawerFilter").value = ctx.quint ? `q:${ctx.quint}` : "all";
+    $("#drawerTitle").textContent = `${termShort(ctx.termIdx)} · ${ctx.subject}`;
+    $("#drawerSub").textContent = `Class of ${ctx.cohort} · Grade ${gradeName(gradeIn(ctx.cohort, fallYearOf(ctx.termIdx)))} · ${schoolText}`;
+    drill.sortKey = "pctile";
+  } else {
+    // ---- Two terms: one row per student, both results side by side ----
+    const { fromIdx, toIdx } = ctx.pair;
+    const matched = $("#matched").checked;
+    const bySid = new Map();
+    for (const r of records) {
+      if (!inCell(r, fromIdx)) continue;
+      const later = recordIndex.get(r.sid + "|" + r.subject + "|" + toIdx);
+      if (matched && !later) continue;          // same-students mode: must have both
+      bySid.set(r.sid, { from: r, to: matched ? later : null });
+    }
+    if (!matched) {                              // all-tested mode: add the "to" term's students too
+      for (const r of records) {
+        if (!inCell(r, toIdx)) continue;
+        const row = bySid.get(r.sid) || { from: null };
+        row.to = r;
+        bySid.set(r.sid, row);
+      }
+    }
+    const fromName = seasonOf(fromIdx), toName = seasonOf(toIdx);
+    drill.rows = [...bySid].map(([sid, { from, to }]) => ({
+      name: nameOf(sid), sid, school: (from || to).school,
+      fromP: from ? from.pctile : null, fromQ: from ? from.quint : "",
+      toP: to ? to.pctile : null, toQ: to ? to.quint : "",
+      dP: from && to && from.pctile !== null && to.pctile !== null ? to.pctile - from.pctile : null,
+      dQ: from && to ? QUINT_INDEX[to.quint] - QUINT_INDEX[from.quint] : null,
+    }));
+    drill.cols = [...base,
+      { key: "fromP", label: `${fromName} %ile`, num: true },
+      { key: "fromQ", label: `${fromName} quintile`, quint: true },
+      { key: "toP", label: `${toName} %ile`, num: true },
+      { key: "toQ", label: `${toName} quintile`, quint: true },
+      { key: "dP", label: "%ile change", num: true, signed: true },
+      { key: "dQ", label: "Quintile move", num: true, signed: true }];
+    drill.filters = [["all", "All students"],
+      ...QUINTILES.map((q) => [`from:${q.key}`, `${fromName}: ${q.key}`]),
+      ...QUINTILES.map((q) => [`to:${q.key}`, `${toName}: ${q.key}`]),
+      ["up", "Moved up a quintile or more"], ["down", "Moved down a quintile or more"], ["same", "Stayed in the same quintile"]];
+    $("#drawerFilter").innerHTML = drill.filters.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+    const side = ctx.termIdx === fromIdx ? "from" : "to";
+    $("#drawerFilter").value = ctx.quint ? `${side}:${ctx.quint}` : "all";
+    $("#drawerTitle").textContent = `${termShort(fromIdx)} → ${termShort(toIdx)} · ${ctx.subject}`;
+    $("#drawerSub").textContent = `Class of ${ctx.cohort} · Grade ${gradeName(gradeIn(ctx.cohort, fallYearOf(fromIdx)))} · ${schoolText} · ${matched ? "same students" : "all tested"}`;
+    drill.sortKey = "dP";
+  }
+  drill.ctx = ctx;
+  drill.sortDir = 1;
+  renderDrill();
+  $("#drawer").hidden = false;
+  $("#drawerClose").focus();
+}
+
+// Rows that pass the "Show" filter, sorted by the chosen column.
+function drillVisibleRows() {
+  const f = $("#drawerFilter").value;
+  const keep = (r) => {
+    if (f === "all") return true;
+    if (f === "up") return r.dQ > 0;
+    if (f === "down") return r.dQ < 0;
+    if (f === "same") return r.dQ === 0;
+    const [side, q] = f.split(":");
+    return side === "q" ? r.quint === q : side === "from" ? r.fromQ === q : r.toQ === q;
+  };
+  const k = drill.sortKey, dir = drill.sortDir;
+  return drill.rows.filter(keep).sort((a, b) => {
+    const x = a[k], y = b[k];
+    if (x === null || x === "") return 1;      // blanks always last
+    if (y === null || y === "") return -1;
+    return (typeof x === "number" ? x - y : String(x).localeCompare(String(y))) * dir;
+  });
+}
+
+function drillCellText(col, v) {
+  if (v === null || v === undefined || v === "") return "";
+  return col.signed ? signed(v) : String(v);
+}
+
+function renderDrill() {
+  const rows = drillVisibleRows();
+  $("#drawerCount").textContent = `${rows.length} of ${drill.rows.length} students`;
+  const arrow = (key) => (drill.sortKey === key ? (drill.sortDir === 1 ? " ▲" : " ▼") : "");
+  const head = drill.cols.map((c) =>
+    `<th class="${c.num ? "num" : ""}"><button type="button" class="sort" data-key="${c.key}">${esc(c.label)}${arrow(c.key)}</button></th>`).join("");
+  const body = rows.map((r) => `<tr>${drill.cols.map((c) =>
+    `<td class="${c.num ? "num" : ""}">${c.quint ? qBadge(r[c.key]) : esc(drillCellText(c, r[c.key]))}</td>`).join("")}</tr>`).join("");
+  $("#drawerTable").innerHTML = `<thead><tr>${head}</tr></thead><tbody>${body || `<tr><td colspan="${drill.cols.length}">No students match.</td></tr>`}</tbody>`;
+}
+
+// Student-level CSV: only after a clear warning, and named so it's obvious what it is.
+function exportDrill() {
+  const ok = confirm("This file will contain student names and scores.\n\n" +
+    "Keep it on district systems, and don't email it outside the district or post it anywhere public.\n\nContinue?");
+  if (!ok) return;
+  const rows = drillVisibleRows();
+  const quote = (v) => (/[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : String(v));
+  const context = [$("#drawerTitle").textContent, $("#drawerSub").textContent].join(" · ");
+  const lines = [["Group", ...drill.cols.map((c) => c.label)].map(quote).join(",")];
+  for (const r of rows) lines.push([context, ...drill.cols.map((c) => drillCellText(c, r[c.key]))].map(quote).join(","));
+  const filterText = $("#drawerFilter").selectedOptions[0].textContent;
+  downloadFile(`CONFIDENTIAL_student_list_${fileSafe(context + " " + filterText).slice(0, 90)}.csv`, "﻿" + lines.join("\r\n"), "text/csv");
+}
+
+// ---- Wiring for the drill-down ----
+$("#drillToggle").checked = false;                 // always start off, even after a reload
+$("#drillToggle").addEventListener("change", () => {
+  const on = $("#drillToggle").checked;
+  document.body.classList.toggle("drill-on", on);
+  $("#drillHint").hidden = !on;
+  if (!on) closeDrawer();
+});
+$("#chart").addEventListener("click", (e) => {
+  if (!$("#drillToggle").checked) return;
+  const target = e.target.closest("[data-drill]");
+  if (!target) return;
+  const [cohort, termIdx, subject, quint] = target.dataset.drill.split("|");
+  const pairEl = target.closest("[data-pair]");
+  const pair = pairEl ? (([f, t]) => ({ fromIdx: Number(f), toIdx: Number(t) }))(pairEl.dataset.pair.split("|")) : null;
+  openDrill({ cohort: Number(cohort), termIdx: Number(termIdx), subject, quint, pair });
+});
+$("#drawerClose").addEventListener("click", closeDrawer);
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && !$("#drawer").hidden) closeDrawer(); });
+$("#drawerFilter").addEventListener("change", renderDrill);
+$("#drawerTable").addEventListener("click", (e) => {
+  const btn = e.target.closest("button.sort");
+  if (!btn) return;
+  if (drill.sortKey === btn.dataset.key) drill.sortDir *= -1;
+  else { drill.sortKey = btn.dataset.key; drill.sortDir = 1; }
+  renderDrill();
+});
+$("#drawerExport").addEventListener("click", exportDrill);
+</script>
+</body>
+</html>
