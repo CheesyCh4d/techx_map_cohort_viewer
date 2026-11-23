@@ -24,7 +24,7 @@
          7  choosing which rows to show
          8  drawing the charts
          9  table view + CSV export
-        10  print + offline snapshot
+        10  hover tooltips
         10b download as PDF (a tiny PDF writer, no library)
         11  light/dark theme
         12  wiring up the buttons and the drop zone
@@ -121,15 +121,33 @@
   details.quality td { padding: 2px 12px 2px 0; }
   details.quality td:last-child { text-align: right; font-variant-numeric: tabular-nums; }
 
-  /* ---- Controls (all filters live above the charts) ---- */
+  /* ---- Settings: three boxes (Report / Students / Format) above the charts.
+     Side by side on wide screens; stacked on narrow ones. ---- */
   #controls {
-    display: flex; flex-direction: column; gap: 10px;
-    padding: 12px 0; margin: 16px 0 8px;
-    border-top: 1px solid var(--line); border-bottom: 1px solid var(--line);
+    display: grid; gap: 12px; margin: 16px 0 8px;
+    grid-template-columns: 1fr;
   }
-  .ctl-row { display: flex; flex-wrap: wrap; gap: 10px 18px; align-items: center; }
+  @media (min-width: 1000px) {
+    #controls { grid-template-columns: minmax(0, 1.5fr) minmax(0, 1fr) minmax(0, 0.9fr); }
+  }
+  .ctl-box {
+    margin: 0; min-width: 0; padding: 6px 14px 14px;
+    border: 1px solid var(--line); border-radius: 8px; background: var(--surface-2);
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .ctl-box legend { padding: 0 6px; font-weight: 700; font-size: 13px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .ctl-box legend span { text-transform: none; letter-spacing: 0; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
+  /* One setting per line: a fixed-width label, then its choices */
+  .ctl-line { display: flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
+  .ctl-line > .ctl-label:first-child { width: 78px; flex: none; }
+  .ctl-box select { min-width: 0; max-width: 100%; }
+  /* A menu next to its label shrinks to fit rather than dropping to the next line */
+  .ctl-line > select { flex: 1 1 120px; }
+  /* A group of choices stays beside its label and wraps inside its own space */
+  .ctl-line > .ctl-group, .ctl-line > #subjects, .ctl-line > #seasons { flex: 1 1 0; min-width: 0; }
   .ctl-group { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
   .ctl-label { color: var(--ink); font-weight: 600; margin-right: 2px; }
+  #loadActions { margin-top: 6px; }
   .seg-toggle { display: inline-flex; border: 1px solid var(--line); border-radius: 6px; overflow: hidden; }
   .seg-toggle button { border: 0; border-radius: 0; background: var(--surface); }
   .seg-toggle button + button { border-left: 1px solid var(--line); }
@@ -212,7 +230,6 @@
   .notes p { margin: 4px 0; }
   .empty-state { color: var(--ink-2); padding: 30px 0; }
   #printHeader { display: none; color: var(--ink-2); margin: 0 0 8px; }
-  #printHeader.show { display: block; }
 
   /* ---- Table view ---- */
   .table-wrap { overflow-x: auto; }
@@ -289,46 +306,68 @@
       (as many terms and years as you like), or <label>choose files<input id="picker" type="file" accept=".csv,.zip,text/csv,application/zip" multiple></label>.
     </div>
     <div id="status"></div>
+    <div id="loadActions" hidden><button type="button" id="clear">Clear data</button></div>
   </section>
 
-  <!-- Section: filters (hidden until data is loaded) -->
+  <!-- Section: settings (hidden until data is loaded), in three groups:
+       Report = what the report shows, Students = who is included,
+       Format = how to view or share it. -->
   <section id="controls" hidden>
-    <div class="ctl-row">
-      <span class="ctl-group">
+    <fieldset class="ctl-box">
+      <legend>Report <span>what to show</span></legend>
+      <div class="ctl-line">
         <span class="ctl-label">View</span>
         <span class="seg-toggle" role="group" aria-label="View">
           <button type="button" data-view="cohort" aria-pressed="true">By cohort</button>
           <button type="button" data-view="year" aria-pressed="false">One school year</button>
         </span>
-      </span>
-      <label id="cohortPick" class="ctl-group"><span class="ctl-label">Cohort</span><select id="cohort"></select></label>
-      <label id="yearPick" class="ctl-group" hidden><span class="ctl-label">School year</span><select id="year"></select></label>
-      <span id="seasonPick" class="ctl-group"><span class="ctl-label">Terms</span><span id="seasons"></span></span>
-      <label class="check"><input type="checkbox" id="compare"> Compare two terms</label>
-      <span id="comparePick" class="ctl-group" hidden>
-        <select id="from" aria-label="Compare from"></select>
-        <span aria-hidden="true">&rarr;</span>
-        <select id="to" aria-label="Compare to"></select>
-        <label class="check" title="Only students who tested in both terms, so the change isn't caused by who happened to test."><input type="checkbox" id="matched" checked> Same students only</label>
-      </span>
-    </div>
-    <div class="ctl-row">
-      <label class="ctl-group"><span class="ctl-label">School</span><select id="school"></select></label>
-      <label class="ctl-group"><span class="ctl-label">Ethnicity</span><select id="eth"></select></label>
-      <label class="ctl-group"><span class="ctl-label">Gender</span><select id="gender"></select></label>    </div>
-    <div class="ctl-row">
-      <span class="ctl-group"><span class="ctl-label">Subjects</span><span id="subjects"></span></span>
-      <label class="check" title="District staff only. Shows student names in a side panel when you click a bar. Names are never included in PDFs, snapshots, printing or the summary export.">
-        <input type="checkbox" id="drillToggle"> Show students</label>
+      </div>
+      <label id="cohortPick" class="ctl-line"><span class="ctl-label">Cohort</span><select id="cohort"></select></label>
+      <label id="yearPick" class="ctl-line" hidden><span class="ctl-label">School year</span><select id="year"></select></label>
+      <div class="ctl-line"><span class="ctl-label">Subjects</span><span id="subjects"></span></div>
+      <div id="seasonPick" class="ctl-line"><span class="ctl-label">Terms</span><span id="seasons"></span></div>
+      <div class="ctl-line">
+        <span class="ctl-label">Compare</span>
+        <span class="ctl-group">
+          <label class="check"><input type="checkbox" id="compare"> Two terms</label>
+          <span id="comparePick" class="ctl-group" hidden>
+            <select id="from" aria-label="Compare from"></select>
+            <span aria-hidden="true">&rarr;</span>
+            <select id="to" aria-label="Compare to"></select>
+            <label class="check" title="Only students who tested in both terms, so the change isn't caused by who happened to test."><input type="checkbox" id="matched" checked> Same students only</label>
+          </span>
+        </span>
+      </div>
+    </fieldset>
+
+    <fieldset class="ctl-box">
+      <legend>Students <span>who is included</span></legend>
+      <label class="ctl-line"><span class="ctl-label">School</span><select id="school"></select></label>
+      <label class="ctl-line"><span class="ctl-label">Ethnicity</span><select id="eth"></select></label>
+      <label class="ctl-line"><span class="ctl-label">Gender</span><select id="gender"></select></label>
+      <div class="ctl-line">
+        <span class="ctl-label">Details</span>
+        <label class="check" title="District staff only. Shows student names in a side panel when you click a bar. Names are never included in the PDF or the summary export.">
+          <input type="checkbox" id="drillToggle"> Show students</label>
+      </div>
       <span id="drillHint" class="drill-hint" hidden>Click any bar, circle or N to list its students.</span>
-      <span class="spacer"></span>
-      <button type="button" id="tableToggle">Show as table</button>
-      <button type="button" id="export">Export summary CSV</button>
-      <button type="button" id="pdf" title="Save the current view as a PDF file.">Download PDF</button>
-      <button type="button" id="print">Print</button>
-      <button type="button" id="snapshot" title="Save what you see as one HTML file (summary numbers only) to share or view offline.">Download snapshot</button>
-      <button type="button" id="clear">Clear data</button>
-    </div>
+    </fieldset>
+
+    <fieldset class="ctl-box">
+      <legend>Format <span>how to view or share</span></legend>
+      <div class="ctl-line">
+        <span class="ctl-label">Display</span>
+        <span class="seg-toggle" role="group" aria-label="Display">
+          <button type="button" data-display="chart" aria-pressed="true">Chart</button>
+          <button type="button" data-display="table" aria-pressed="false">Table</button>
+        </span>
+      </div>
+      <div class="ctl-line">
+        <span class="ctl-label">Download</span>
+        <button type="button" id="pdf" title="Save the current view as a PDF file.">PDF</button>
+        <button type="button" id="export" title="Counts and percentages for all cohorts, for the current subjects, terms and students.">Summary CSV</button>
+      </div>
+    </fieldset>
   </section>
 
   <div id="printHeader"></div>
@@ -338,8 +377,8 @@
 </main>
 <div id="tip" role="tooltip"></div>
 
-<!-- Student drill-down panel (section 13). Kept outside <main> so it is
-     never copied into snapshots, and hidden when printing. -->
+<!-- Student drill-down panel (section 13). Hidden when printing, and never
+     drawn into the PDF. -->
 <aside id="drawer" hidden aria-label="Students in this group">
   <div class="drawer-head">
     <div><h2 id="drawerTitle"></h2><div id="drawerSub" class="sub"></div></div>
@@ -352,7 +391,7 @@
     <button type="button" id="drawerExport">Export student list</button>
   </div>
   <div class="drawer-body"><table class="data" id="drawerTable"></table></div>
-  <p class="drawer-note">Confidential student information, for district staff only. Names appear only in this panel; they are never included in PDFs, snapshots, printing or the summary export.</p>
+  <p class="drawer-note">Confidential student information, for district staff only. Names appear only in this panel; they are never included in the PDF or the summary export.</p>
 </aside>
 
 <script>
@@ -646,7 +685,7 @@ function loadCsvText(fileName, text) {
    student's grade and graduation cohort attached. `recordIndex` lets us find
    "this student's Reading result in Spring 2024" instantly, which the
    same-students comparison needs. Student IDs stay inside this tab; they are
-   never drawn, exported or put in a snapshot.
+   never drawn, exported or put in the PDF.
    ========================================================================= */
 let records = [];
 let recordIndex = new Map();
@@ -918,7 +957,7 @@ function buildPanels(s) {
 function barBlock(c, label) {
   if (!c) return `<div class="plot nodata">no tests</div><div class="n"></div>`;
   // data-drill tells the drill-down which group was clicked: cohort|term|subject|quintile.
-  // It holds no student information, so it's harmless in snapshots.
+  // It holds no student information.
   const drillId = (q) => `data-drill="${c.cohort}|${c.termIdx}|${esc(c.subject)}|${q}"`;
   let left = 0;
   const segs = QUINTILES.map((qt) => {
@@ -1147,19 +1186,14 @@ function exportCsv() {
 }
 
 /* =========================================================================
-   10. PRINT + OFFLINE SNAPSHOT
+   10. HOVER TOOLTIPS
    -------------------------------------------------------------------------
-   Print uses the browser's own print dialog; the print rules in <style>
-   hide the controls and switch to light colors. Choose "Save as PDF" there
-   to get a PDF.
-
-   A snapshot is a brand-new HTML file built from what is on screen right now:
-   the same styles, the chart, legend and notes, plus the small tooltip code.
-   It contains only the numbers you can see - no student rows and none of
-   the code that reads CSV files - so it is safe to email or post.
+   One floating box, shown for anything with a data-tip attribute.
+   (Sharing is done with Download PDF in section 10b. If someone presses
+   Ctrl+P anyway, the print rules in <style> hide the controls and switch
+   to light colors.)
    ========================================================================= */
 function installTooltip() {
-  // Written to stand on its own, because a copy of it goes into snapshots.
   const tip = document.getElementById("tip");
   document.addEventListener("mouseover", (e) => {
     const target = e.target.closest("[data-tip]");
@@ -1174,40 +1208,6 @@ function installTooltip() {
     tip.style.left = x + "px";
     tip.style.top = y + "px";
   });
-}
-
-function buildSnapshot() {
-  const s = currentSettings();
-  const title = describeSelection(s);
-  const css = document.querySelector("style").textContent;
-  const theme = document.documentElement.dataset.theme;
-  // Note "<\/script>": writing the closing tag plainly here would end THIS
-  // page's script early, so the slash is escaped.
-  return `<!doctype html>
-<html lang="en"${theme ? ` data-theme="${theme}"` : ""}>
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>MAP cohort snapshot - ${esc(title)}</title>
-<style>${css}</style>
-</head>
-<body>
-<main>
-  <h1>MAP Cohort Viewer: snapshot</h1>
-  <div id="printHeader" class="show">${$("#printHeader").innerHTML}</div>
-  ${$("#legend").innerHTML}
-  ${$("#chart").innerHTML}
-  ${$("#notes").innerHTML}
-</main>
-<div id="tip" role="tooltip"></div>
-<script>(${installTooltip.toString()})();<\/script>
-</body>
-</html>`;
-}
-
-function downloadSnapshot() {
-  const s = currentSettings();
-  downloadFile(`map_cohort_snapshot_${fileSafe(describeSelection(s)).slice(0, 80)}.html`, buildSnapshot(), "text/html");
 }
 
 /* =========================================================================
@@ -1530,20 +1530,12 @@ function refreshControls() {
   const years = fallYears();
   const latest = years[years.length - 1];
 
-  // Cohort list. Default: the cohort with the most terms of data.
-  const termsPerCohort = new Map();
-  for (const r of records) {
-    if (!termsPerCohort.has(r.cohort)) termsPerCohort.set(r.cohort, new Set());
-    termsPerCohort.get(r.cohort).add(r.termIdx);
-  }
-  const cohorts = allCohorts();
-  let defaultCohort = cohorts[0];
-  for (const c of cohorts) if (termsPerCohort.get(c).size >= termsPerCohort.get(defaultCohort).size) defaultCohort = c;
-  fillSelect($("#cohort"), [["__all", "All cohorts"], ...cohorts.map((c) => {
+  // Cohort list. Default: All cohorts.
+  fillSelect($("#cohort"), [["__all", "All cohorts"], ...allCohorts().map((c) => {
     const g = gradeIn(c, latest);
     const when = g > 12 ? "graduated" : g < 0 ? "not yet in K" : `grade ${gradeName(g)} in ${yearShort(latest)}`;
     return [c, `Class of ${c} (${when})`];
-  })], defaultCohort);
+  })], "__all");
 
   fillSelect($("#year"), years.map((y) => [y, yearShort(y)]).reverse(), latest);
 
@@ -1572,6 +1564,7 @@ function refreshControls() {
 
 function renderStatus() {
   const box = $("#status");
+  $("#loadActions").hidden = !store.files.length;   // "Clear data" only once something is loaded
   if (!store.files.length) { box.innerHTML = ""; return; }
   const items = store.files.map((f) => {
     if (["AssessmentResults", "StudentsBySchool"].includes(f.kind)) {
@@ -1736,15 +1729,13 @@ $("#compare").addEventListener("change", () => {
 ["#cohort", "#year", "#school", "#eth", "#gender", "#from", "#to", "#matched"].forEach((sel) => $(sel).addEventListener("change", render));
 $("#subjects").addEventListener("change", render);
 $("#seasons").addEventListener("change", render);
-$("#tableToggle").addEventListener("click", () => {
-  ui.table = !ui.table;
-  $("#tableToggle").textContent = ui.table ? "Show as chart" : "Show as table";
+document.querySelectorAll("[data-display]").forEach((btn) => btn.addEventListener("click", () => {
+  ui.table = btn.dataset.display === "table";
+  document.querySelectorAll("[data-display]").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
   render();
-});
+}));
 $("#export").addEventListener("click", exportCsv);
-$("#print").addEventListener("click", () => window.print());
 $("#pdf").addEventListener("click", downloadPdf);
-$("#snapshot").addEventListener("click", downloadSnapshot);
 $("#clear").addEventListener("click", () => {
   store.files = []; store.tests.clear(); store.enrollments.clear();
   records = []; recordIndex = new Map(); studentNames = new Map(); quality = {};
@@ -1765,8 +1756,8 @@ installTooltip();
    -------------------------------------------------------------------------
    With "Show students" ticked, clicking a bar segment, median circle or N
    opens a side panel listing the students behind it. The list is built on
-   the spot from `records` (which never leave this tab). The panel sits
-   outside <main>, so snapshots never copy it, and print rules hide it.
+   the spot from `records` (which never leave this tab). The PDF never
+   draws it, and print rules hide it.
    The switch is deliberately NOT remembered: every visit starts with it off.
    ========================================================================= */
 const drill = { ctx: null, rows: [], cols: [], filters: [], sortKey: null, sortDir: 1 };

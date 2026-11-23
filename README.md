@@ -12,22 +12,28 @@ Open it in a browser and drop your CDF CSV files onto it. Everything runs in the
    - `AssessmentResults.csv` and `StudentsBySchool.csv` on their own.
 
    Drop several years at once if you like; repeated rows are skipped. Other CSVs in the download (such as ClassAssignments) are listed as ignored.
-4. Pick a view:
-   - **By cohort**: one graduating class over time.
-   - **One school year**: every grade in one year.
-5. Choose which terms to show (Fall, Winter, Spring), the subjects, and optionally:
-   - a **School**;
-   - a student group: **Ethnicity** and **Gender**.
+4. Use the three settings boxes above the chart.
 
-   Group menus list whatever values your files contain. Each student is counted by their details as listed for that term; in same-students comparisons, the first term counts. Small groups are greyed out, and the chosen group is named on charts, PDFs and exports.
-6. To compare, tick **Compare two terms** and pick From and To (e.g. Fall → Spring, Spring → Fall, Fall → Winter).
-   - **Same students only** (on by default) counts just the students who tested in both terms.
+**Report** (what to show)
+- **View:**
+  - **By cohort**: one graduating class over time. Cohort starts on All cohorts.
+  - **One school year**: every grade in one year.
+- **Subjects** and **Terms** (Fall, Winter, Spring).
+- **Compare: Two terms** shows From and To menus (e.g. Fall → Spring, Spring → Fall, Fall → Winter). **Same students only** (on by default) counts just the students who tested in both terms.
 
-Buttons:
-- **Export summary CSV** saves counts and percentages for all cohorts (never student rows).
-- **Download PDF** saves the current view straight to a PDF file: landscape, multi-page, with page numbers. The page builds the PDF itself, so it works offline.
-- **Print** opens the browser's print dialog, in light colors and landscape.
-- **Download snapshot** saves what's on screen as one HTML file, summary numbers only, that anyone can open offline.
+**Students** (who is included)
+- **School**, **Ethnicity** and **Gender**. The menus list whatever values your files contain.
+- Each student is counted by their details as listed for that term. In same-students comparisons, the first term counts.
+- Small groups are greyed out, and the chosen group is named on charts, PDFs and exports.
+- **Show students** turns on the student drill-down (see below).
+
+**Format** (how to view or share)
+- **Display: Chart / Table.**
+- **Download: PDF** saves the current view straight to a PDF file: landscape, multi-page, with page numbers. The page builds the PDF itself, so it works offline.
+- **Download: Summary CSV** saves counts and percentages for all cohorts (never student rows).
+
+Elsewhere:
+- **Clear data** (under the file list) removes everything loaded.
 - **Auto / Light / Dark** (top right) sets the color theme.
 
 ### Seeing the students behind a bar (district staff only)
@@ -36,7 +42,7 @@ Buttons:
 - In compare mode the panel shows both terms side by side, with the change. Its **Show** menu can filter to students who moved up, moved down or stayed in the same quintile.
 - Click a column heading to sort by it.
 - **Export student list** saves that list as a CSV after a confidentiality warning. The file name starts with `CONFIDENTIAL_`.
-- Names appear only in that panel. They are never included in the PDF, the snapshot, printing or the summary CSV.
+- Names appear only in that panel. They are never included in the PDF or the summary CSV.
 
 To share the tool with another district, send them `index.html`. That one file is the whole tool.
 
