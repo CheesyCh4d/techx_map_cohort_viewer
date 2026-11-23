@@ -143,6 +143,10 @@
   .ctl-box select { min-width: 0; max-width: 100%; }
   /* A menu next to its label shrinks to fit rather than dropping to the next line */
   .ctl-line > select { flex: 1 1 120px; }
+  .ctl-line > input[type="search"] {
+    flex: 1 1 140px; min-width: 0; padding: 5px 8px;
+    background: var(--surface); border: 1px solid var(--line); border-radius: 6px;
+  }
   /* A group of choices stays beside its label and wraps inside its own space */
   .ctl-line > .ctl-group, .ctl-line > #subjects, .ctl-line > #seasons { flex: 1 1 0; min-width: 0; }
   .ctl-group { display: inline-flex; flex-wrap: wrap; gap: 6px 10px; align-items: center; }
@@ -251,12 +255,22 @@
   .drill-on #chart [data-drill] { cursor: pointer; }
   .drill-on #chart .seg:hover { filter: brightness(1.15); }
   .drill-on #chart .bubble:hover, .drill-on #chart .n:hover { text-decoration: underline; }
+  /* A full-width sheet that slides up from the bottom of the window, so the
+     table has the whole screen width for its columns. */
   #drawer {
-    position: fixed; top: 0; right: 0; bottom: 0; z-index: 20;
-    width: min(680px, 100vw); display: flex; flex-direction: column;
-    background: var(--surface); border-left: 1px solid var(--line);
-    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.18);
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 20;
+    height: min(55vh, 560px); display: flex; flex-direction: column;
+    background: var(--surface); border-top: 1px solid var(--line);
+    border-radius: 12px 12px 0 0;
+    box-shadow: 0 -8px 24px rgba(0, 0, 0, 0.18);
+    animation: sheet-up 0.18s ease-out;
   }
+  @keyframes sheet-up { from { transform: translateY(24px); opacity: 0; } }
+  @media (prefers-reduced-motion: reduce) { #drawer { animation: none; } }
+  /* Line the sheet's contents up with the page above it */
+  .drawer-head, .drawer-tools, .drawer-body, .drawer-note { width: 100%; max-width: 1280px; margin-left: auto; margin-right: auto; }
+  /* While the sheet is open, leave room under the page so nothing is stuck behind it */
+  body.sheet-open main { padding-bottom: calc(min(55vh, 560px) + 16px); }
   .drawer-head { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px; padding: 16px 16px 10px; border-bottom: 1px solid var(--line); }
   .drawer-head .sub, .drawer-tools .sub { color: var(--ink-2); font-size: 13px; }
   #drawerClose { font-size: 20px; line-height: 1; padding: 4px 10px; }
@@ -329,7 +343,10 @@
       <div class="ctl-line">
         <span class="ctl-label">Compare</span>
         <span class="ctl-group">
-          <label class="check"><input type="checkbox" id="compare"> Two terms</label>
+          <span class="seg-toggle" role="group" aria-label="Compare two terms">
+            <button type="button" data-compare="off" aria-pressed="true">Off</button>
+            <button type="button" data-compare="on" aria-pressed="false">On</button>
+          </span>
           <span id="comparePick" class="ctl-group" hidden>
             <select id="from" aria-label="Compare from"></select>
             <span aria-hidden="true">&rarr;</span>
@@ -344,13 +361,20 @@
       <legend>Students <span>who is included</span></legend>
       <label class="ctl-line"><span class="ctl-label">School</span><select id="school"></select></label>
       <label class="ctl-line"><span class="ctl-label">Ethnicity</span><select id="eth"></select></label>
-      <label class="ctl-line"><span class="ctl-label">Gender</span><select id="gender"></select></label>
-      <div class="ctl-line">
+      <label class="ctl-line"><span class="ctl-label">Gender</span><select id="gender"></select></label>      <div class="ctl-line">
         <span class="ctl-label">Details</span>
-        <label class="check" title="District staff only. Shows student names in a side panel when you click a bar. Names are never included in the PDF or the summary export.">
+        <label class="check" title="District staff only. Shows student names in a panel at the bottom of the screen when you click a bar. Names are never included in the PDF or the summary export.">
           <input type="checkbox" id="drillToggle"> Show students</label>
       </div>
       <span id="drillHint" class="drill-hint" hidden>Click any bar, circle or N to list its students.</span>
+      <div id="findPick" class="ctl-line" hidden>
+        <label class="ctl-label" for="findStudent">Find</label>
+        <input type="search" id="findStudent" list="studentOptions" placeholder="Name or StudentID" autocomplete="off"
+               title="Pick a student to see their full MAP history.">
+        <button type="button" id="findGo">Find</button>
+        <datalist id="studentOptions"></datalist>
+      </div>
+      <span id="findMsg" class="drill-hint" hidden></span>
     </fieldset>
 
     <fieldset class="ctl-box">
@@ -742,7 +766,8 @@ function rebuild() {
       rit: Number.isFinite(t.rit) ? t.rit : null,
       // Student group details as listed for THIS term
       eth: demoOf.get(t.sid + "|" + t.termIdx).eth,
-      gender: demoOf.get(t.sid + "|" + t.termIdx).gender,    };
+      gender: demoOf.get(t.sid + "|" + t.termIdx).gender,
+    };
     out.push(r);
     index.set(r.sid + "|" + r.subject + "|" + r.termIdx, r);
     q.bySeason[r.season]++;
@@ -849,7 +874,7 @@ function aggregateMatched(f, subjects, fromSeason, toSeason) {
    A row is either one term ({cohort, termIdx}) or, in compare mode, a pair
    of terms ({cohort, fromIdx, toIdx}).
    ========================================================================= */
-const ui = { view: "cohort", table: false };
+const ui = { view: "cohort", table: false, compare: false };
 
 const checkedValues = (sel) => [...document.querySelectorAll(sel + " input:checked")].map((i) => i.value);
 const selectedSubjects = () => checkedValues("#subjects");
@@ -865,7 +890,7 @@ function currentSettings() {
     school: $("#school").value,
     subjects: selectedSubjects(),
     seasons: selectedSeasons(),
-    compare: $("#compare").checked,
+    compare: ui.compare,
     from: $("#from").value,
     to: $("#to").value,
     matched: $("#matched").checked,
@@ -873,7 +898,7 @@ function currentSettings() {
   s.schoolText = s.school === "__all" ? "All schools" : s.school;
   s.filter = readFilters();
   s.groupText = groupText(s.filter);
-  s.whoText = [s.schoolText, s.groupText].filter(Boolean).join(" · ");   // e.g. "Maple Elementary · F · EL"
+  s.whoText = [s.schoolText, s.groupText].filter(Boolean).join(" · ");   // e.g. "Maple Elementary · Asian · F"
   s.cells = aggregate(s.filter, s.subjects);
   if (s.compare && s.matched) s.pairs = aggregateMatched(s.filter, s.subjects, s.from, s.to);
   return s;
@@ -1090,7 +1115,7 @@ function notesList(s) {
     "Bars show the share of tested students in each NWEA achievement quintile; numbers inside are percentages. The circle is the median national percentile, on the same 0-100 scale. If a group matched national norms, each segment would be about 20% wide.",
     s.compare ? `Comparisons: percentiles are measured against each season's national norms, so a positive change means the group gained ground on students nationally, not just that scores went up. "Same students only" counts students with a result in both terms; otherwise each term shows everyone tested then. "pts HiAvg+High" is the change in the share of students in the top two quintiles, in percentage points.` : "",
     "One test per student per subject per term (the growth-measure test, otherwise the latest).",
-    s.groupText ? `Student group (${s.groupText}): each student's ethnicity and gender as listed for that term${s.compare && s.matched ? " (the first term, for same-students comparisons)" : ""}. Small groups are greyed out; treat them with care.` : "",
+    s.groupText ? `Student group (${s.groupText}): each student's details as listed for that term${s.compare && s.matched ? " (the first term, for same-students comparisons)" : ""}. Small groups are greyed out; treat them with care.` : "",
   ].filter(Boolean);
 }
 
@@ -1546,6 +1571,7 @@ function refreshControls() {
   const valuesOf = (key) => [...new Set(records.map((r) => r[key]))].sort();
   fillSelect($("#eth"), [["__all", "All"], ...valuesOf("eth").map((v) => [v, v])], "__all");
   fillSelect($("#gender"), [["__all", "All"], ...valuesOf("gender").map((v) => [v, v])], "__all");
+
   // Terms: Fall ticked by default (or the first season present).
   const seasons = presentSeasons();
   fillChecks($("#seasons"), seasons, (v) => v === (seasons.includes("Fall") ? "Fall" : seasons[0]));
@@ -1560,6 +1586,7 @@ function refreshControls() {
     return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
   });
   fillChecks($("#subjects"), subjects, (v) => /^(read|math)/i.test(v));
+  if ($("#drillToggle").checked) fillStudentOptions();   // new files loaded: refresh the Find list
 }
 
 function renderStatus() {
@@ -1721,11 +1748,14 @@ document.querySelectorAll("[data-view]").forEach((btn) => btn.addEventListener("
   $("#yearPick").hidden = ui.view !== "year";
   render();
 }));
-$("#compare").addEventListener("change", () => {
-  $("#comparePick").hidden = !$("#compare").checked;
-  $("#seasonPick").hidden = $("#compare").checked;
+// Compare Off/On: when on, the From -> To menus replace the Terms checkboxes.
+document.querySelectorAll("[data-compare]").forEach((btn) => btn.addEventListener("click", () => {
+  ui.compare = btn.dataset.compare === "on";
+  document.querySelectorAll("[data-compare]").forEach((b) => b.setAttribute("aria-pressed", String(b === btn)));
+  $("#comparePick").hidden = !ui.compare;
+  $("#seasonPick").hidden = ui.compare;
   render();
-});
+}));
 ["#cohort", "#year", "#school", "#eth", "#gender", "#from", "#to", "#matched"].forEach((sel) => $(sel).addEventListener("change", render));
 $("#subjects").addEventListener("change", render);
 $("#seasons").addEventListener("change", render);
@@ -1740,6 +1770,7 @@ $("#clear").addEventListener("click", () => {
   store.files = []; store.tests.clear(); store.enrollments.clear();
   records = []; recordIndex = new Map(); studentNames = new Map(); quality = {};
   closeDrawer();
+  $("#studentOptions").innerHTML = ""; $("#findStudent").value = ""; $("#findMsg").hidden = true;
   $("#subjects").innerHTML = ""; $("#seasons").innerHTML = "";
   refreshControls(); renderStatus(); render();
 });
@@ -1755,7 +1786,7 @@ installTooltip();
    13. STUDENT DRILL-DOWN (district staff only, off by default)
    -------------------------------------------------------------------------
    With "Show students" ticked, clicking a bar segment, median circle or N
-   opens a side panel listing the students behind it. The list is built on
+   opens a panel (sliding up from the bottom) listing the students behind it. The list is built on
    the spot from `records` (which never leave this tab). The PDF never
    draws it, and print rules hide it.
    The switch is deliberately NOT remembered: every visit starts with it off.
@@ -1765,7 +1796,12 @@ const QUINT_INDEX = Object.fromEntries(QUINTILES.map((q, i) => [q.key, i]));
 const nameOf = (sid) => studentNames.get(sid) || "(no name found)";
 const qBadge = (q) => (q ? `<span class="qdot" style="background:var(--q-${q.toLowerCase()})"></span>${q}` : "");
 
-function closeDrawer() { $("#drawer").hidden = true; drill.ctx = null; }
+function closeDrawer() { $("#drawer").hidden = true; document.body.classList.remove("sheet-open"); drill.ctx = null; }
+function showDrawer() {
+  $("#drawer").hidden = false;
+  document.body.classList.add("sheet-open");
+  $("#drawerClose").focus();
+}
 
 // ctx: { cohort, termIdx, subject, quint, pair: {fromIdx, toIdx} | null }
 function openDrill(ctx) {
@@ -1838,10 +1874,10 @@ function openDrill(ctx) {
     drill.sortKey = "dP";
   }
   drill.ctx = ctx;
+  drill.unit = "students";
   drill.sortDir = 1;
   renderDrill();
-  $("#drawer").hidden = false;
-  $("#drawerClose").focus();
+  showDrawer();
 }
 
 // Rows that pass the "Show" filter, sorted by the chosen column.
@@ -1852,6 +1888,7 @@ function drillVisibleRows() {
     if (f === "up") return r.dQ > 0;
     if (f === "down") return r.dQ < 0;
     if (f === "same") return r.dQ === 0;
+    if (f.startsWith("season:")) return r.season === f.slice(7);   // student history: one season only
     const [side, q] = f.split(":");
     return side === "q" ? r.quint === q : side === "from" ? r.fromQ === q : r.toQ === q;
   };
@@ -1866,19 +1903,106 @@ function drillVisibleRows() {
 
 function drillCellText(col, v) {
   if (v === null || v === undefined || v === "") return "";
+  if (col.format) return col.format(v);          // e.g. term index -> "Fall 2023-24"
   return col.signed ? signed(v) : String(v);
 }
 
 function renderDrill() {
   const rows = drillVisibleRows();
-  $("#drawerCount").textContent = `${rows.length} of ${drill.rows.length} students`;
+  $("#drawerCount").textContent = `${rows.length} of ${drill.rows.length} ${drill.unit}`;
   const arrow = (key) => (drill.sortKey === key ? (drill.sortDir === 1 ? " ▲" : " ▼") : "");
   const head = drill.cols.map((c) =>
     `<th class="${c.num ? "num" : ""}"><button type="button" class="sort" data-key="${c.key}">${esc(c.label)}${arrow(c.key)}</button></th>`).join("");
   const body = rows.map((r) => `<tr>${drill.cols.map((c) =>
     `<td class="${c.num ? "num" : ""}">${c.quint ? qBadge(r[c.key]) : esc(drillCellText(c, r[c.key]))}</td>`).join("")}</tr>`).join("");
-  $("#drawerTable").innerHTML = `<thead><tr>${head}</tr></thead><tbody>${body || `<tr><td colspan="${drill.cols.length}">No students match.</td></tr>`}</tbody>`;
+  $("#drawerTable").innerHTML = `<thead><tr>${head}</tr></thead><tbody>${body || `<tr><td colspan="${drill.cols.length}">Nothing matches.</td></tr>`}</tbody>`;
 }
+
+/* ---- One student's history (from the Find box) ----------------------------
+   Every test result this student has in the loaded files, one row per term,
+   with each subject's quintile, percentile and RIT side by side. It ignores
+   the chart's filters on purpose: it's a lookup of one student's record. */
+const SUBJECT_SHORT = { "Reading": "Read", "Mathematics": "Math", "Language Usage": "Lang", "Science": "Sci", "Reading (Spanish)": "Read (Sp)" };
+const bySubjectOrder = (a, b) => {
+  const ia = PREFERRED_SUBJECTS.indexOf(a), ib = PREFERRED_SUBJECTS.indexOf(b);
+  return (ia < 0 ? 99 : ia) - (ib < 0 ? 99 : ib) || a.localeCompare(b);
+};
+
+function openStudent(sid) {
+  const recs = records.filter((r) => r.sid === sid);
+  if (!recs.length) return false;
+  const subjects = [...new Set(recs.map((r) => r.subject))].sort(bySubjectOrder);
+
+  // Fold the results into one row per term.
+  const byTerm = new Map();
+  for (const r of recs) {
+    if (!byTerm.has(r.termIdx)) byTerm.set(r.termIdx, { termIdx: r.termIdx, season: r.season, grade: r.grade, school: r.school });
+    const row = byTerm.get(r.termIdx);
+    row[r.subject + "|q"] = r.quint;
+    row[r.subject + "|p"] = r.pctile;
+    row[r.subject + "|rit"] = r.rit;
+  }
+  drill.rows = [...byTerm.values()];
+  drill.cols = [
+    { key: "termIdx", label: "Term", format: termShort },
+    { key: "grade", label: "Grade", num: true, format: gradeName },
+    { key: "school", label: "School" },
+    ...subjects.flatMap((s) => {
+      const short = SUBJECT_SHORT[s] || s;
+      return [{ key: s + "|q", label: `${short} quintile`, quint: true },
+              { key: s + "|p", label: `${short} %ile`, num: true },
+              { key: s + "|rit", label: `${short} RIT`, num: true }];
+    }),
+  ];
+  const seasons = SEASONS.filter((x) => drill.rows.some((r) => r.season === x));
+  drill.filters = [["all", "All terms"], ...seasons.map((x) => [`season:${x}`, `${x} only`])];
+  $("#drawerFilter").innerHTML = drill.filters.map(([v, t]) => `<option value="${v}">${esc(t)}</option>`).join("");
+  $("#drawerFilter").value = "all";
+
+  const latest = recs.reduce((a, b) => (b.termIdx > a.termIdx ? b : a));
+  $("#drawerTitle").textContent = nameOf(sid);
+  $("#drawerSub").textContent = [`StudentID ${sid}`, `Class of ${latest.cohort}`,
+    `Grade ${gradeName(latest.grade)} in ${termShort(latest.termIdx)}`, latest.school, latest.eth, latest.gender]
+    .filter((v) => v && v !== "(blank)").join(" · ");
+  drill.ctx = { student: sid };
+  drill.unit = "terms";
+  drill.sortKey = "termIdx";
+  drill.sortDir = 1;
+  renderDrill();
+  showDrawer();
+  return true;
+}
+
+// The Find box's suggestion list: "Last, First (StudentID)" for every student with results.
+// Filled only while "Show students" is on, and emptied when it's turned off.
+function fillStudentOptions() {
+  const sids = [...new Set(records.map((r) => r.sid))];
+  const options = sids.map((sid) => `${nameOf(sid)} (${sid})`).sort((a, b) => a.localeCompare(b));
+  $("#studentOptions").innerHTML = options.map((o) => `<option value="${esc(o)}">`).join("");
+}
+
+// Work out which student was typed or picked, then open their history.
+function findStudent() {
+  const text = $("#findStudent").value.trim();
+  const msg = $("#findMsg");
+  msg.hidden = true;
+  if (!text) return;
+  const picked = text.match(/\(([^()]+)\)\s*$/);            // "Alder, Casey (100117)"
+  let sid = picked ? picked[1] : null;
+  if (!sid && recordIndexHasStudent(text)) sid = text;        // a bare StudentID
+  if (!sid) {                                                // part of a name: only if it's unique
+    const needle = text.toLowerCase();
+    const hits = [...new Set(records.map((r) => r.sid))].filter((s) => nameOf(s).toLowerCase().includes(needle));
+    if (hits.length === 1) sid = hits[0];
+    else {
+      msg.textContent = hits.length ? `${hits.length} students match; pick one from the list.` : "No student found.";
+      msg.hidden = false;
+      return;
+    }
+  }
+  if (!openStudent(sid)) { msg.textContent = "No test results for that student."; msg.hidden = false; }
+}
+const recordIndexHasStudent = (sid) => records.some((r) => r.sid === sid);
 
 // Student-level CSV: only after a clear warning, and named so it's obvious what it is.
 function exportDrill() {
@@ -1900,8 +2024,19 @@ $("#drillToggle").addEventListener("change", () => {
   const on = $("#drillToggle").checked;
   document.body.classList.toggle("drill-on", on);
   $("#drillHint").hidden = !on;
-  if (!on) closeDrawer();
+  $("#findPick").hidden = !on;
+  if (on) fillStudentOptions();
+  else {
+    closeDrawer();
+    $("#studentOptions").innerHTML = "";   // take the names back out of the page
+    $("#findStudent").value = "";
+    $("#findMsg").hidden = true;
+  }
 });
+// Search with the Find button, by picking from the list (which fires "change"), or with Enter.
+$("#findGo").addEventListener("click", findStudent);
+$("#findStudent").addEventListener("change", findStudent);
+$("#findStudent").addEventListener("keydown", (e) => { if (e.key === "Enter") { e.preventDefault(); findStudent(); } });
 $("#chart").addEventListener("click", (e) => {
   if (!$("#drillToggle").checked) return;
   const target = e.target.closest("[data-drill]");
