@@ -93,6 +93,7 @@
   }
   main { max-width: 1280px; margin: 0 auto; padding: 20px 16px 48px; }
   h1 { font-size: 22px; margin: 0 0 4px; }
+  h1 .version { font-size: 13px; font-weight: 400; color: var(--ink-2); margin-left: 4px; }
   h2 { font-size: 17px; margin: 0; }
   .top { display: flex; justify-content: space-between; align-items: flex-start; gap: 12px 24px; flex-wrap: wrap; }
   .privacy { color: var(--ink-2); margin: 0 0 16px; }
@@ -302,7 +303,7 @@
 <main>
   <header class="top">
     <div>
-      <h1>MAP Cohort Viewer</h1>
+      <h1>MAP Cohort Viewer <span id="appVersion" class="version"></span></h1>
       <p class="privacy">Your files are read inside this browser tab only. Nothing is uploaded or saved; closing the tab clears everything.</p>
     </div>
     <span class="seg-toggle" id="themePick" role="group" aria-label="Color theme">
@@ -434,6 +435,10 @@ const QUINTILES = [
   { key: "High",  range: "81st-99th percentile" },
 ];
 const SEASONS = ["Fall", "Winter", "Spring"];  // order within a school year
+// The version of this tool. Bump it for each GitHub release (e.g. "1.1.0"),
+// so people can tell which copy they have: it shows next to the title and
+// in the PDF footer.
+const APP_VERSION = "1.0.0";
 const MIN_N = 10;              // bars with fewer students than this are greyed out
 const PREFERRED_SUBJECTS = ["Reading", "Mathematics", "Language Usage", "Science"];
 
@@ -1502,7 +1507,7 @@ function buildPdf() {
     y += line ? 10 : 4;
   }
   pages.forEach((p, i) => {
-    p.text(PM, PH - PM + 14, "MAP Cohort Viewer - summary counts only, no student-level data", 7, { color: P_MUTED });
+    p.text(PM, PH - PM + 14, `MAP Cohort Viewer v${APP_VERSION} - summary counts only, no student-level data`, 7, { color: P_MUTED });
     p.text(PW - PM, PH - PM + 14, `Page ${i + 1} of ${pages.length}`, 7, { color: P_MUTED, align: "right" });
   });
   return assemblePdf(pages, title);
@@ -1781,6 +1786,8 @@ document.querySelectorAll("[data-theme-choice]").forEach((b) =>
 applyTheme(document.documentElement.dataset.theme || "auto");
 
 installTooltip();
+$("#appVersion").textContent = `v${APP_VERSION}`;
+document.title = `MAP Cohort Viewer v${APP_VERSION}`;
 
 /* =========================================================================
    13. STUDENT DRILL-DOWN (district staff only, off by default)

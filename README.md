@@ -3,6 +3,11 @@
 One web page (`index.html`) that shows NWEA MAP achievement-quintile results by graduation-year cohort.
 Open it in a browser and drop your CDF CSV files onto it. Everything runs in the browser; no data is uploaded or saved.
 
+## Download
+Get the latest version from the repository's **Releases** page (right-hand side of the GitHub page, or `/releases`). Under **Assets**, download **MAP-Cohort-Viewer-vX.Y.Z.html**. That one file is the whole tool. The version number also shows next to the page title and in the PDF footer.
+
+To share it, send that file. Zip it first if your email system blocks `.html` attachments.
+
 ## Use it
 1. In MAP Growth, download the Comprehensive Data File (CDF) for one or more terms.
 2. Double-click `index.html` (Chrome, Edge, Firefox or Safari).
